@@ -1,0 +1,9 @@
+*.apk
+*.obb
+*.vpk
+*.velf
+*.elf
+*.o
+
+# FetchContent downloads and extracted dependency sources.
+_deps/
