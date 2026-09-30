@@ -1,0 +1,17 @@
+diff --git a/source/vgl.c b/source/vgl.c
+index 014e790..b01cc1d 100644
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -785,6 +785,11 @@ void vglSetShaderCachePath(const char *path) {
+ #endif
+ }
+ 
++// Older VitaSDK libvitashark builds do not expose this optional diagnostics API.
++extern void shark_set_shader_association_path(const char *path) __attribute__((weak));
+ void vglSetShaderAssociationPath(const char *path) {
+-	shark_set_shader_association_path(path);
++	if (shark_set_shader_association_path)
++		shark_set_shader_association_path(path);
++	else
++		vgl_log("Shader association capture is unavailable in this libvitashark build.\n");
+ }

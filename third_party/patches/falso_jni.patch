@@ -1,0 +1,565 @@
+diff --git a/FalsoJNI.c b/FalsoJNI.c
+index f2e22df..a0fe0d7 100644
+--- a/FalsoJNI.c
++++ b/FalsoJNI.c
+@@ -1,3 +1,4 @@
++#include "sif.h"
+ /*
+  * FalsoJNI.c
+  *
+@@ -256,7 +257,9 @@ jobject NewObjectV(JNIEnv* env, jclass clazz, jmethodID methodID, va_list args)
+ 
+ jobject NewObjectA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue *args) {
+     fjni_logv_dbg("[JNI] NewObjectA(env, 0x%x, %i)", (int)clazz, methodID);
+-    return methodObjectCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodObjectCall(methodID,converted);
+ }
+ 
+ jclass GetObjectClass(JNIEnv* env, jobject obj) {
+@@ -272,6 +275,7 @@ jboolean IsInstanceOf(JNIEnv* env, jobject obj, jclass clazz) {
+ }
+ 
+ jmethodID GetMethodID(JNIEnv* env, jclass clazz, const char* _name, const char* sig) {
++    sif_java_check_method(_name,sig);
+     jmethodID ret;
+     char name[512];
+ 
+@@ -289,6 +293,8 @@ jmethodID GetMethodID(JNIEnv* env, jclass clazz, const char* _name, const char*
+     }
+ 
+     ret = getMethodIdByName(name);
++    if(ret)sif_java_bind_method(ret,sig);
++    if(!ret) { sif_log("Missing JNI method %s %s class=%.160s",name,sig,clazz?(const char*)clazz:"<NULL>"); sif_stop("JNI method unimplemented"); }
+ 
+     if (ret != NULL) {
+         fjni_logv_dbg("[JNI] GetMethodID(env, 0x%x, \"%s\", \"%s\"): %i", (int)clazz, name, sig, (int)ret);
+@@ -318,7 +324,9 @@ jobject CallObjectMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list
+ 
+ jobject CallObjectMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallObjectMethodA(env, 0x%x, %i, args)", (int)obj, (int)methodID);
+-    return methodObjectCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodObjectCall(methodID,converted);
+ }
+ 
+ jboolean CallBooleanMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -340,7 +348,9 @@ jboolean CallBooleanMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_lis
+ 
+ jboolean CallBooleanMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallBooleanMethodA(env, 0x%x, %i, args)", (int)obj, (int)methodID);
+-    return methodBooleanCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodBooleanCall(methodID,converted);
+ }
+ 
+ jbyte CallByteMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -362,7 +372,9 @@ jbyte CallByteMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list args
+ 
+ jbyte CallByteMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallByteMethodA(env, 0x%x, %i, args)", (int)obj, (int)methodID);
+-    return methodByteCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodByteCall(methodID,converted);
+ }
+ 
+ jchar CallCharMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -384,7 +396,9 @@ jchar CallCharMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list args
+ 
+ jchar CallCharMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallCharMethodA(env, 0x%x, %i, args)", (int)obj, (int)methodID);
+-    return methodCharCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodCharCall(methodID,converted);
+ }
+ 
+ jshort CallShortMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -406,7 +420,9 @@ jshort CallShortMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list ar
+ 
+ jshort CallShortMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallShortMethodA(env, 0x%x, %i, args)", (int)obj, (int)methodID);
+-    return methodShortCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodShortCall(methodID,converted);
+ }
+ 
+ jint CallIntMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -428,7 +444,9 @@ jint CallIntMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list args)
+ 
+ jint CallIntMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallIntMethodA(env, 0x%x, %i, args)", (int)obj, methodID);
+-    return methodIntCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodIntCall(methodID,converted);
+ }
+ 
+ jlong CallLongMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -450,7 +468,9 @@ jlong CallLongMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list args
+ 
+ jlong CallLongMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallLongMethodA(env, 0x%x, %i, args)", (int)obj, methodID);
+-    return methodLongCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodLongCall(methodID,converted);
+ }
+ 
+ jfloat CallFloatMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -472,7 +492,9 @@ jfloat CallFloatMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list ar
+ 
+ jfloat CallFloatMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallFloatMethodA(env, 0x%x, %i, args)", (int)obj, methodID);
+-    return methodFloatCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodFloatCall(methodID,converted);
+ }
+ 
+ jdouble CallDoubleMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -494,7 +516,9 @@ jdouble CallDoubleMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list
+ 
+ jdouble CallDoubleMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallDoubleMethodA(env, 0x%x, %i, args)", (int)obj, methodID);
+-    return methodDoubleCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodDoubleCall(methodID,converted);
+ }
+ 
+ void CallVoidMethod(JNIEnv* env, jobject obj, jmethodID methodID, ...) {
+@@ -513,7 +537,9 @@ void CallVoidMethodV(JNIEnv* env, jobject obj, jmethodID methodID, va_list args)
+ 
+ void CallVoidMethodA(JNIEnv* env, jobject obj, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallVoidMethodA(env, 0x%x, %i, args)", (int)obj, methodID);
+-    methodVoidCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    methodVoidCall(methodID,converted);
+ }
+ 
+ jobject CallNonvirtualObjectMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -535,7 +561,9 @@ jobject CallNonvirtualObjectMethodV(JNIEnv* env, jobject obj, jclass clazz, jmet
+ 
+ jobject CallNonvirtualObjectMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualObjectMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodObjectCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodObjectCall(methodID,converted);
+ }
+ 
+ jboolean CallNonvirtualBooleanMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -557,7 +585,9 @@ jboolean CallNonvirtualBooleanMethodV(JNIEnv* env, jobject obj, jclass clazz, jm
+ 
+ jboolean CallNonvirtualBooleanMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualBooleanMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodBooleanCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodBooleanCall(methodID,converted);
+ }
+ 
+ jbyte CallNonvirtualByteMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -579,7 +609,9 @@ jbyte CallNonvirtualByteMethodV(JNIEnv* env, jobject obj, jclass clazz, jmethodI
+ 
+ jbyte CallNonvirtualByteMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualByteMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodByteCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodByteCall(methodID,converted);
+ }
+ 
+ jchar CallNonvirtualCharMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -601,7 +633,9 @@ jchar CallNonvirtualCharMethodV(JNIEnv* env, jobject obj, jclass clazz, jmethodI
+ 
+ jchar CallNonvirtualCharMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualCharMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodCharCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodCharCall(methodID,converted);
+ }
+ 
+ jshort CallNonvirtualShortMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -623,7 +657,9 @@ jshort CallNonvirtualShortMethodV(JNIEnv* env, jobject obj, jclass clazz, jmetho
+ 
+ jshort CallNonvirtualShortMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualShortMethodV(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodShortCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodShortCall(methodID,converted);
+ }
+ 
+ jint CallNonvirtualIntMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -645,7 +681,9 @@ jint CallNonvirtualIntMethodV(JNIEnv* env, jobject obj, jclass clazz, jmethodID
+ 
+ jint CallNonvirtualIntMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualIntMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodIntCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodIntCall(methodID,converted);
+ }
+ 
+ jlong CallNonvirtualLongMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -667,7 +705,9 @@ jlong CallNonvirtualLongMethodV(JNIEnv* env, jobject obj, jclass clazz, jmethodI
+ 
+ jlong CallNonvirtualLongMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualLongMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodLongCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodLongCall(methodID,converted);
+ }
+ 
+ jfloat CallNonvirtualFloatMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -689,7 +729,9 @@ jfloat CallNonvirtualFloatMethodV(JNIEnv* env, jobject obj, jclass clazz, jmetho
+ 
+ jfloat CallNonvirtualFloatMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualFloatMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodFloatCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodFloatCall(methodID,converted);
+ }
+ 
+ jdouble CallNonvirtualDoubleMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -711,7 +753,9 @@ jdouble CallNonvirtualDoubleMethodV(JNIEnv* env, jobject obj, jclass clazz, jmet
+ 
+ jdouble CallNonvirtualDoubleMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualDoubleMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    return methodDoubleCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodDoubleCall(methodID,converted);
+ }
+ 
+ void CallNonvirtualVoidMethod(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, ...) {
+@@ -730,10 +774,13 @@ void CallNonvirtualVoidMethodV(JNIEnv* env, jobject obj, jclass clazz, jmethodID
+ 
+ void CallNonvirtualVoidMethodA(JNIEnv* env, jobject obj, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallNonvirtualVoidMethodA(env, 0x%x, 0x%x, %i, args)", (int)obj, (int)clazz, methodID);
+-    methodVoidCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    methodVoidCall(methodID,converted);
+ }
+ 
+ jfieldID GetFieldID(JNIEnv * env, jclass clazz, const char* name, const char* t) {
++    sif_java_check_field(name,t);
+     fjni_logv_dbg("[JNI] GetFieldID(env, 0x%x, \"%s\", \"%s\")", (int)clazz, name, t);
+     return getFieldIdByName(name);
+ }
+@@ -829,6 +876,7 @@ void SetDoubleField(JNIEnv* env, jobject obj, jfieldID fieldID, jdouble value) {
+ }
+ 
+ jmethodID GetStaticMethodID(JNIEnv* env, jclass clazz, const char* _name, const char* sig) {
++    sif_java_check_method(_name,sig);
+     jmethodID ret;
+     char name[512];
+ 
+@@ -846,6 +894,8 @@ jmethodID GetStaticMethodID(JNIEnv* env, jclass clazz, const char* _name, const
+     }
+ 
+     ret = getMethodIdByName(name);
++    if(ret)sif_java_bind_method(ret,sig);
++    if(!ret) { sif_log("Missing JNI method %s %s class=%.160s",name,sig,clazz?(const char*)clazz:"<NULL>"); sif_stop("JNI method unimplemented"); }
+ 
+     if (ret != NULL) {
+         fjni_logv_dbg("[JNI] GetStaticMethodID(env, 0x%x, \"%s\", \"%s\"): %i", (int)clazz, name, sig, (int)ret);
+@@ -875,7 +925,9 @@ jobject CallStaticObjectMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, v
+ 
+ jobject CallStaticObjectMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticObjectMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodObjectCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodObjectCall(methodID,converted);
+ }
+ 
+ jboolean CallStaticBooleanMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -897,7 +949,9 @@ jboolean CallStaticBooleanMethodV(JNIEnv* env, jclass clazz, jmethodID methodID,
+ 
+ jboolean CallStaticBooleanMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticBooleanMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodBooleanCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodBooleanCall(methodID,converted);
+ }
+ 
+ jbyte CallStaticByteMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -919,7 +973,9 @@ jbyte CallStaticByteMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_li
+ 
+ jbyte CallStaticByteMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticByteMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodByteCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodByteCall(methodID,converted);
+ }
+ 
+ jchar CallStaticCharMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -941,7 +997,9 @@ jchar CallStaticCharMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_li
+ 
+ jchar CallStaticCharMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticCharMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodCharCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodCharCall(methodID,converted);
+ }
+ 
+ jshort CallStaticShortMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -963,7 +1021,9 @@ jshort CallStaticShortMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_
+ 
+ jshort CallStaticShortMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticShortMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodShortCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodShortCall(methodID,converted);
+ }
+ 
+ jint CallStaticIntMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -985,7 +1045,9 @@ jint CallStaticIntMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_list
+ 
+ jint CallStaticIntMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticIntMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodIntCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodIntCall(methodID,converted);
+ }
+ 
+ jlong CallStaticLongMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -1007,7 +1069,9 @@ jlong CallStaticLongMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_li
+ 
+ jlong CallStaticLongMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticLongMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodLongCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodLongCall(methodID,converted);
+ }
+ 
+ jfloat CallStaticFloatMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -1029,7 +1093,9 @@ jfloat CallStaticFloatMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_
+ 
+ jfloat CallStaticFloatMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticFloatMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodFloatCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodFloatCall(methodID,converted);
+ }
+ 
+ jdouble CallStaticDoubleMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -1051,7 +1117,9 @@ jdouble CallStaticDoubleMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, v
+ 
+ jdouble CallStaticDoubleMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticDoubleMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    return methodDoubleCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    return methodDoubleCall(methodID,converted);
+ }
+ 
+ void CallStaticVoidMethod(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+@@ -1070,10 +1138,13 @@ void CallStaticVoidMethodV(JNIEnv* env, jclass clazz, jmethodID methodID, va_lis
+ 
+ void CallStaticVoidMethodA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+     fjni_logv_dbg("[JNI] CallStaticVoidMethodA(env, 0x%x, %i, args)", (int)clazz, (int)methodID);
+-    methodVoidCall(methodID, _AtoV(0, args));
++    uint64_t packed[64]; va_list converted;
++    sif_java_pack_args(methodID,args,packed,sizeof(packed),&converted);
++    methodVoidCall(methodID,converted);
+ }
+ 
+ jfieldID GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, const char* t) {
++    sif_java_check_field(name,t);
+     fjni_logv_dbg("[JNI] GetStaticFieldID(env, 0x%x, \"%s\", \"%s\")", (int)clazz, name, t);
+     return getFieldIdByName(name);
+ }
+@@ -1234,7 +1305,7 @@ const jchar * GetStringChars(JNIEnv* env, jstring string, jboolean *isCopy) {
+         *isCopy = JNI_TRUE;
+     }
+ 
+-    jchar * ret = malloc(str->utf16->len * sizeof(jchar));
++    jchar * ret = malloc(str->utf16->len ? str->utf16->len * sizeof(jchar) : 1);
+     if (ret == NULL) {
+         fjni_logv_err("[JNI] GetStringChars(env, %p, *isCopy): malloc failed", string);
+         return NULL;
+@@ -1274,6 +1345,8 @@ void ReleaseStringChars(JNIEnv* env, jstring string, const jchar *chars) {
+ }
+ 
+ jstring NewStringUTF(JNIEnv* env, const char* bytes) {
++    // Android accepts a null C string and returns a null Java reference.
++    if (!bytes) return NULL;
+     fjni_logv_dbg("[JNI] NewStringUTF(env, \"%s\")", bytes);
+ 
+     int len = strlen(bytes) + 1; // with null terminator
+@@ -1312,54 +1385,18 @@ jstring NewStringUTF(JNIEnv* env, const char* bytes) {
+     return res;
+ }
+ 
+-jsize GetStringUTFLength(JNIEnv* env, jstring string) {
+-    if (!string) {
+-        fjni_logv_err("[JNI] GetStringUTFLength(env, %p): string is null", string);
+-    }
+-
+-    JavaString * str = string;
+-
+-    // Performing extraneous conversion on debug builds to show the string in the console output
+-#if FALSOJNI_DEBUGLEVEL <= FALSOJNI_DEBUG_ALL
+-    if (jstr_utf16_to_utf8(str) == JNI_FALSE) {
+-        fjni_logv_err("[JNI] GetStringUTFLength(env, %p): debug utf16 conversion failed", string);
+-    } else {
+-        fjni_logv_dbg("[JNI] GetStringUTFLength(env, \"%s\")", str->utf8->array);
+-    }
+-#endif
+-
+-    return str->utf16->len;
++jsize GetStringUTFLength(JNIEnv* env,jstring string) {
++    JavaString *str=string;
++    if(!str || !jstr_utf16_to_utf8(str))return 0;
++    return str->utf8->len-1;
+ }
+-
+-const char* GetStringUTFChars(JNIEnv* env, jstring string, jboolean* isCopy) {
+-    if (!string) {
+-        fjni_logv_err("[JNI] GetStringUTFChars(env, %p, *isCopy): string is null", string);
+-        return NULL;
+-    }
+-
+-    JavaString * str = string;
+-
+-    if (isCopy != NULL) {
+-        *isCopy = JNI_TRUE;
+-    }
+-
+-    char * ret = malloc(str->utf16->len + 1);
+-    if (ret == NULL) {
+-        fjni_logv_err("[JNI] GetStringUTFChars(env, %p, *isCopy): malloc failed", string);
+-        return NULL;
+-    }
+-
+-    if (jstr_utf16_to_utf8(str) == JNI_FALSE) {
+-        fjni_logv_err("[JNI] GetStringUTFChars(env, %p, *isCopy): utf16 conversion failed", string);
+-        free(ret);
+-        return NULL;
+-    }
+-
+-    memcpy(ret, str->utf8->array, str->utf8->len);
+-
+-    fjni_logv_dbg("[JNI] GetStringUTFChars(env, \"%s\", *isCopy)", (char *)str->utf8->array);
+-
+-    return ret;
++const char *GetStringUTFChars(JNIEnv* env,jstring string,jboolean *isCopy) {
++    JavaString *str=string;
++    if(!str || !jstr_utf16_to_utf8(str))return NULL;
++    char *copy=malloc(str->utf8->len);if(!copy)return NULL;
++    memcpy(copy,str->utf8->array,str->utf8->len);
++    if(isCopy)*isCopy=JNI_TRUE;
++    return copy;
+ }
+ 
+ void ReleaseStringUTFChars(JNIEnv* env, jstring string, char* chars) {
+diff --git a/FalsoJNI_ImplBridge.c b/FalsoJNI_ImplBridge.c
+index 127dd72..3e5dd4f 100644
+--- a/FalsoJNI_ImplBridge.c
++++ b/FalsoJNI_ImplBridge.c
+@@ -21,6 +21,7 @@
+ #include <pthread.h>
+ 
+ #include "converter.h"
++#include "jni_utf.h"
+ 
+ #define JDA_MAGIC 0xB00B1E5
+ 
+@@ -276,7 +277,8 @@ jfloat methodFloatCall(jmethodID id, va_list args) {
+ }
+ 
+ JavaDynArray * jda_alloc(jsize len, FIELD_TYPE type) {
+-    void * array = malloc(len * getFieldTypeSize(type));
++    if(len<0)return NULL;
++    void * array = malloc(len ? len * getFieldTypeSize(type) : 1);
+     if (!array) {
+         return NULL;
+     }
+@@ -312,6 +314,7 @@ jboolean jda_realloc(JavaDynArray * jda, jsize len) {
+     }
+ 
+     jda->array = res;
++    jda->len = len;
+ 
+     return JNI_TRUE;
+ }
+@@ -332,21 +335,17 @@ jboolean jda_free(JavaDynArray * jda) {
+ jboolean jstr_utf16_to_utf8(JavaString * jstr) {
+     if (!jstr) return JNI_FALSE;
+ 
+-    if (jstr->utf8 == NULL) {
+-        jstr->utf8 = jda_alloc(jstr->utf16->len+1, FIELD_TYPE_BYTE);
+-        if (jstr->utf8 == NULL) {
+-            return JNI_FALSE;
+-        }
+-    } else if (jstr->utf8->len < jstr->utf16->len+1) {
+-        if (jda_realloc(jstr->utf8, jstr->utf16->len+1) == JNI_FALSE) {
+-            return JNI_FALSE;
+-        }
++    if (!jstr->utf16) return JNI_FALSE;
++    size_t bytes=sif_mutf8_encode(jstr->utf16->array,jstr->utf16->len,NULL);
++    if(bytes>=0x7fffffff)return JNI_FALSE;
++    if (!jstr->utf8) {
++        jstr->utf8=jda_alloc(bytes+1,FIELD_TYPE_BYTE);
++        if(!jstr->utf8)return JNI_FALSE;
++    } else if(jstr->utf8->len!=(jsize)(bytes+1)) {
++        if(!jda_realloc(jstr->utf8,bytes+1))return JNI_FALSE;
+     }
+-
+-    utf16_to_utf8(jstr->utf16->array, jstr->utf16->len, jstr->utf8->array, jstr->utf8->len);
+-
+-    char * arr = jstr->utf8->array;
+-    arr[jstr->utf8->len - 1] = '\0';
++    sif_mutf8_encode(jstr->utf16->array,jstr->utf16->len,jstr->utf8->array);
++    ((char *)jstr->utf8->array)[bytes]=0;
+     return JNI_TRUE;
+ }
+ 
+@@ -363,7 +362,7 @@ jboolean jstr_utf8_to_utf16(JavaString * jstr) {
+         }
+     }
+ 
+-    utf8_to_utf16(jstr->utf8->array, jstr->utf8->len - 1, jstr->utf16->array, jstr->utf16->len);
++    jstr->utf16->len = sif_mutf8_decode(jstr->utf8->array, jstr->utf8->len - 1, jstr->utf16->array);
+ 
+     return JNI_TRUE;
+ }
+diff --git a/FalsoJNI_Logger.c b/FalsoJNI_Logger.c
+index cfea61b..fcc8e90 100644
+--- a/FalsoJNI_Logger.c
++++ b/FalsoJNI_Logger.c
+@@ -1,3 +1,4 @@
++#include "sif.h"
+ /*
+  * FalsoJNI_Logger.c
+  *
+@@ -53,7 +54,7 @@ static char _fjni_log_buffer_2[2048];
+     va_start(list, fmt); \
+     sceClibVsnprintf(_fjni_log_buffer_2, sizeof(_fjni_log_buffer_2) - 1, _fjni_log_buffer_1, list); \
+     va_end(list); \
+-    sceClibPrintf(_fjni_log_buffer_2);
++    sif_log("%s",_fjni_log_buffer_2);
+ 
+ void _fjni_log_info(const char *fi, int li, const char *fn, const char* fmt, ...) {
+ #if FALSOJNI_DEBUGLEVEL <= FALSOJNI_DEBUG_INFO

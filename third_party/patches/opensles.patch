@@ -1,0 +1,541 @@
+diff --git a/libopensles/IBufferQueue.c b/libopensles/IBufferQueue.c
+index baf95fe..91924be 100644
+--- a/libopensles/IBufferQueue.c
++++ b/libopensles/IBufferQueue.c
+@@ -17,6 +17,8 @@
+ /* BufferQueue implementation */
+ 
+ #include "sles_allinclusive.h"
++#include <psp2/kernel/processmgr.h>
++extern void vita_audio_work(unsigned,unsigned,unsigned) __attribute__((weak));
+ 
+ 
+ /** Determine the state of the audio player or audio recorder associated with a buffer queue.
+@@ -72,74 +74,16 @@ SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint
+         if (newRear == this->mFront) {
+             result = SL_RESULT_BUFFER_INSUFFICIENT;
+         } else {
+-            int num_cycles = (&_opensles_user_freq!=NULL?_opensles_user_freq:44100) * 1000 / this->samplerate;
+-            int multiplier = 1;
+-            void *ownedBuffer = NULL;
+-            if (this->channels == 1)
+-                multiplier *= 2;
+-            if (this->bps == 8)
+-                multiplier *= 2;
+-            if (num_cycles != 1 || this->channels == 1 || this->bps == 8) {
+-                ownedBuffer = calloc(1, size * num_cycles * multiplier);
+-                if (NULL == ownedBuffer) {
+-                    interface_unlock_exclusive(this);
+-                    result = SL_RESULT_RESOURCE_ERROR;
+-                    goto fail;
+-                }
+-                if (this->bps != 8) {
+-                    if (this->channels == 2) { // PCM16 Stereo
+-                        uint32_t *src = (uint32_t *)pBuffer;
+-                        uint32_t *dst = (uint32_t *)ownedBuffer;
+-                        for (int j = 0; j < size; j += 4) {
+-                            for (int i = 0; i < num_cycles; i++) {
+-                                dst[i] = *src;
+-                            }
+-                            src++;
+-                            dst += num_cycles;
+-                        }
+-                    } else { // PCM16 Mono
+-                        uint16_t *src = (uint16_t *)pBuffer;
+-                        uint16_t *dst = (uint16_t *)ownedBuffer;
+-                        for (int j = 0; j < size; j += 2) {
+-                            for (int i = 0; i < num_cycles; i++) {
+-                                dst[i*2] = *src;
+-                                dst[i*2+1] = *src;
+-                            }
+-                            src++;
+-                            dst += num_cycles * 2;
+-                        }
+-                    }
+-                } else {
+-                    if (this->channels == 2) { // PCM8 Stereo
+-                        uint8_t *src = (uint8_t *)pBuffer;
+-                        int16_t *dst = (int16_t *)ownedBuffer;
+-                        for (int j = 0; j < size; j += 2) {
+-                            for (int i = 0; i < num_cycles; i++) {
+-                                dst[i*2] = ((int16_t)src[0] - 0x80) << 8;
+-                                dst[i*2+1] = ((int16_t)src[1] - 0x80) << 8;
+-                            }
+-                            src += 2;
+-                            dst += num_cycles * 2;
+-                        }
+-                    } else { // PCM8 Mono
+-                        uint8_t *src = (uint8_t *)pBuffer;
+-                        int16_t *dst = (int16_t *)ownedBuffer;
+-                        for (int j = 0; j < size; j++) {
+-                            for (int i = 0; i < num_cycles; i++) {
+-                                dst[i*2] = ((int16_t)*src - 0x80) << 8;
+-                                dst[i*2+1] = ((int16_t)*src - 0x80) << 8;
+-                            }
+-                            src++;
+-                            dst += num_cycles * 2;
+-                        }
+-                    }
+-                }
+-                pBuffer = ownedBuffer;
++            unsigned frame_bytes=this->channels*(this->bps/8);
++            if(!this->samplerate || (this->channels!=1 && this->channels!=2) ||
++                (this->bps!=8 && this->bps!=16) || size%frame_bytes) {
++                interface_unlock_exclusive(this);
++                result=SL_RESULT_PARAMETER_INVALID;goto fail;
+             }
++            // Preserve Android buffer ownership until its completion callback.
++            // Resample only the portion needed by each mixer output block.
+             assert(NULL == oldRear->mOwnedBuffer);
+-            oldRear->mBuffer = pBuffer;
+-            oldRear->mSize = size * num_cycles * multiplier;
+-            oldRear->mOwnedBuffer = ownedBuffer;
++            oldRear->mBuffer=pBuffer;oldRear->mSize=size;oldRear->mOwnedBuffer=NULL;
+             this->mRear = newRear;
+             ++this->mState.count;
+             if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
+@@ -159,6 +103,23 @@ fail:
+ }
+ 
+ 
++// Called with the player locked, only by the mixer (including its callbacks).
++void IBufferQueue_ClearFromMixer(CAudioPlayer *player)
++{
++    IBufferQueue *queue = &player->mBufferQueue;
++    vita_pcm_reset(&queue->pcm_state);
++    IBufferQueue_ReleaseArrayBuffers(queue);
++    queue->mFront = queue->mRear = &queue->mArray[0];
++    queue->mState.count = queue->mState.playIndex = 0;
++    queue->mClearRequested = SL_BOOLEAN_FALSE;
++    if (player->mTrack) {
++        player->mTrack->mReader = NULL;
++        player->mTrack->mAvail = 0;
++    }
++}
++
++extern int vita_is_mixer_thread(void);
++
+ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
+ {
+     SL_ENTER_INTERFACE
+@@ -186,10 +147,15 @@ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
+ #ifdef USE_OUTPUTMIXEXT
+     // mixer might be reading from the front buffer, so tread carefully here
+     // NTH asynchronous cancel instead of blocking until mixer acknowledges
+-    this->mClearRequested = SL_BOOLEAN_TRUE;
+-    do {
+-        interface_cond_wait(this);
+-    } while (this->mClearRequested);
++    if (vita_is_mixer_thread() && SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
++        IBufferQueue_ClearFromMixer((CAudioPlayer *)this->mThis);
++        interface_cond_broadcast(this);
++    } else {
++        this->mClearRequested = SL_BOOLEAN_TRUE;
++        do {
++            interface_cond_wait(this);
++        } while (this->mClearRequested);
++    }
+ #endif
+ 
+     interface_unlock_exclusive(this);
+@@ -257,6 +223,7 @@ void IBufferQueue_init(void *self)
+ {
+     //SL_LOGV("IBufferQueue_init(%p) entering", self);
+     IBufferQueue *this = (IBufferQueue *) self;
++    memset(&this->pcm_state,0,sizeof(this->pcm_state));
+     this->mItf = &IBufferQueue_Itf;
+     this->mState.count = 0;
+     this->mState.playIndex = 0;
+@@ -284,6 +251,7 @@ void IBufferQueue_init(void *self)
+ 
+ void IBufferQueue_Destroy(IBufferQueue *this)
+ {
++    vita_pcm_destroy(&this->pcm_state);
+     IBufferQueue_ReleaseArrayBuffers(this);
+     if ((NULL != this->mArray) && (this->mArray != this->mTypical)) {
+         free(this->mArray);
+diff --git a/libopensles/IEngine.c b/libopensles/IEngine.c
+index 4d3e27f..3d1acac 100644
+--- a/libopensles/IEngine.c
++++ b/libopensles/IEngine.c
+@@ -163,6 +163,10 @@ static SLresult IEngine_CreateAudioPlayer(SLEngineItf self, SLObjectItf *pPlayer
+                     // Initialize private fields not associated with an interface
+                     this->mMuteMask = 0;
+                     this->mSoloMask = 0;
++                    // Internal transport code also reads these fields when the
++                    // optional seek interface was not exposed/initialized.
++                    this->mSeek.mPos = SL_TIME_UNKNOWN;
++                    this->mSeek.mEndPos = SL_TIME_UNKNOWN;
+                     // Will be set soon for PCM buffer queues, or later by platform-specific code
+                     // during Realize or Prefetch
+                     this->mNumChannels = 0;
+diff --git a/libopensles/IOutputMixExt.c b/libopensles/IOutputMixExt.c
+index 7941cdd..cf969e8 100644
+--- a/libopensles/IOutputMixExt.c
++++ b/libopensles/IOutputMixExt.c
+@@ -17,6 +17,9 @@
+ /* OutputMixExt implementation */
+ 
+ #include "sles_allinclusive.h"
++#include <psp2/kernel/processmgr.h>
++extern void vita_audio_track(unsigned,int,int,unsigned,int,int) __attribute__((weak));
++extern void vita_audio_work(unsigned,unsigned,unsigned) __attribute__((weak));
+ #include <math.h>
+ 
+ 
+@@ -93,14 +96,7 @@ static SLboolean track_check(Track *track)
+         if (audioPlayer->mBufferQueue.mClearRequested) {
+             // application thread(s) that call BufferQueue::Clear while mixer is active
+             // will block synchronously until mixer acknowledges the Clear request
+-            IBufferQueue_ReleaseArrayBuffers(&audioPlayer->mBufferQueue);
+-            audioPlayer->mBufferQueue.mFront = &audioPlayer->mBufferQueue.mArray[0];
+-            audioPlayer->mBufferQueue.mRear = &audioPlayer->mBufferQueue.mArray[0];
+-            audioPlayer->mBufferQueue.mState.count = 0;
+-            audioPlayer->mBufferQueue.mState.playIndex = 0;
+-            audioPlayer->mBufferQueue.mClearRequested = SL_BOOLEAN_FALSE;
+-            track->mReader = NULL;
+-            track->mAvail = 0;
++            IBufferQueue_ClearFromMixer(audioPlayer);
+             doBroadcast = SL_BOOLEAN_TRUE;
+         }
+ 
+@@ -123,6 +119,10 @@ static SLboolean track_check(Track *track)
+         switch (audioPlayer->mPlay.mState) {
+ 
+         case SL_PLAYSTATE_PLAYING:  // continue playing current track data
++            // Gain changes (including a fade-in from mute) apply even while a
++            // continuous queue keeps mAvail nonzero across buffer boundaries.
++            track->mGains[0] = audioPlayer->mGains[0];
++            track->mGains[1] = audioPlayer->mGains[1];
+             if (0 < track->mAvail) {
+                 trackHasData = SL_BOOLEAN_TRUE;
+                 break;
+@@ -290,17 +290,27 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+             summaries[channel] = summarize_gain(gain);
+         }
+         while (desired > 0) {
+-            unsigned actual = desired;
+-            if (track->mAvail < actual) {
+-                actual = track->mAvail;
++            unsigned actual=0,consumed=0;
++            int16_t rendered[256];
++            if(track->mAvail) {
++                IBufferQueue *queue=&track->mAudioPlayer->mBufferQueue;
++                consumed=track->mAvail;actual=desired>sizeof(rendered)?sizeof(rendered):desired;
++                unsigned output_rate=(&_opensles_user_freq && _opensles_user_freq>0)?_opensles_user_freq:44100;
++                uint64_t begin=sceKernelGetProcessTimeWide();
++                int status=vita_pcm_render(&queue->pcm_state,queue->samplerate,output_rate,queue->channels,queue->bps,
++                    track->mReader,&consumed,rendered,&actual);
++                if(vita_audio_work)vita_audio_work(0,sceKernelGetProcessTimeWide()-begin,consumed);
++                assert(status==0);
++                if(vita_audio_track) {
++                    unsigned peak=0;for(unsigned j=0;j<actual/2;j++){unsigned v=rendered[j]<0?-(int)rendered[j]:rendered[j];if(v>peak)peak=v;}
++                    vita_audio_track(peak,(int)(track->mGains[0]*1000000),(int)(outputMixGains[0]*1000000),queue->samplerate,track->mAudioPlayer->mVolume.mLevel,track->mAudioPlayer->mVolume.mMute);
++                }
+             }
+-            // force actual to be a frame multiple
+-            if (actual > 0) {
+-                assert(NULL != track->mReader);
+-                stereo *mixBuffer = (stereo *) dstWriter;
+-                const stereo *source = (const stereo *) track->mReader;
++            if(actual || consumed) {
++                stereo *mixBuffer=(stereo *)dstWriter;
++                const stereo *source=(const stereo *)rendered;
+                 unsigned j;
+-                if (GAIN_MUTE != summaries[0] || GAIN_MUTE != summaries[1]) {
++                if (actual && (GAIN_MUTE != summaries[0] || GAIN_MUTE != summaries[1])) {
+                     if (mixBufferHasData) {
+                         // apply gain during add
+                         if (GAIN_UNITY != summaries[0] || GAIN_UNITY != summaries[1]) {
+@@ -324,15 +334,15 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+                             }
+                         // no gain adjustment needed, so do a simple copy
+                         } else {
+-                            memcpy(dstWriter, track->mReader, actual);
++                            memcpy(dstWriter, rendered, actual);
+                         }
+                     }
+                     trackContributedToMix = SL_BOOLEAN_TRUE;
+                 }
+                 dstWriter = (char *) dstWriter + actual;
+                 desired -= actual;
+-                track->mReader = (char *) track->mReader + actual;
+-                track->mAvail -= actual;
++                track->mReader = (char *) track->mReader + consumed;
++                track->mAvail -= consumed;
+                 if (track->mAvail == 0) {
+                     IBufferQueue *bufferQueue = &track->mAudioPlayer->mBufferQueue;
+                     interface_lock_exclusive(bufferQueue);
+@@ -364,7 +374,9 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+                     interface_unlock_exclusive(bufferQueue);
+                     // The callback function is called on each buffer completion
+                     if (NULL != callback) {
++                        uint64_t callback_start=sceKernelGetProcessTimeWide();
+                         (*callback)((SLBufferQueueItf) bufferQueue, context);
++                        if(vita_audio_work)vita_audio_work(1,sceKernelGetProcessTimeWide()-callback_start,0);
+                         // Maybe it enqueued another buffer, or maybe it didn't.
+                         // We will find out later during the next mixer frame.
+                     }
+diff --git a/libopensles/IPlay.c b/libopensles/IPlay.c
+index 62961ae..deb90db 100644
+--- a/libopensles/IPlay.c
++++ b/libopensles/IPlay.c
+@@ -52,6 +52,8 @@ void audioPlayerHandlePositionUpdate(CAudioPlayer *audioPlayer, SLboolean *headA
+ #endif
+ 
+ 
++extern int vita_is_mixer_thread(void);
++
+ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+ {
+     SL_ENTER_INTERFACE
+@@ -109,6 +111,7 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+                 break;
+ 
+             case (SL_PLAYSTATE_STOPPING << 2) | SL_PLAYSTATE_STOPPED:
++                if (vita_is_mixer_thread()) break;
+                 // either spurious wakeup, or someone else requested same transition
+                 continue;
+ 
+@@ -124,6 +127,10 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+                 this->mHeadStalled = SL_BOOLEAN_FALSE;
+                 this->mMarkerReached = SL_BOOLEAN_FALSE;
+                 this->mState = SL_PLAYSTATE_STOPPING;
++                // HEADATEND callbacks execute on the mixer itself. Leave
++                // STOPPING queued for its next pass instead of self-waiting.
++                // GetPlayState already maps STOPPING to STOPPED.
++                if (vita_is_mixer_thread()) break;
+                 continue;
+ 
+             default:
+@@ -247,7 +254,10 @@ static SLresult IPlay_GetPosition(SLPlayItf self, SLmillisecond *pMsec)
+         if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
+             CAudioPlayer *audioPlayer = (CAudioPlayer *) this->mThis;
+             SLmillisecond pos = audioPlayer->mSeek.mPos;
+-            if (SL_TIME_UNKNOWN != pos) {
++            // construct() initializes only exposed interfaces. A PCM player
++            // without SL_IID_SEEK has a zero-filled mSeek, not a pending seek
++            // to zero. Do not let it override the running playback clock.
++            if (NULL != audioPlayer->mSeek.mItf && SL_TIME_UNKNOWN != pos) {
+                 position = pos;
+             }
+         }
+diff --git a/libopensles/Vita.c b/libopensles/Vita.c
+index caa1a40..8a23197 100644
+--- a/libopensles/Vita.c
++++ b/libopensles/Vita.c
+@@ -33,8 +33,20 @@ static int audio_thread_valid;
+ static SceUID audio_thread_handle = -1;
+ #endif
+ 
++extern void vita_audio_pcm(const short *,unsigned) __attribute__((weak));
++extern void vita_audio_timing(unsigned,unsigned,unsigned) __attribute__((weak));
+ uint8_t audio_buffers[SndFile_NUMBUFS][SndFile_BUFSIZE];
+ 
++// A playback callback runs inside the mixer. It cannot wait for that same
++// mixer to acknowledge a state transition until the callback has returned.
++int vita_is_mixer_thread(void) {
++#ifdef HAVE_PTHREAD
++	return audio_thread_valid && pthread_equal(pthread_self(), audio_thread_handle);
++#else
++	return sceKernelGetThreadId() == audio_thread_handle;
++#endif
++}
++
+ static void reset_audio_backend_state(void) {
+ 	audio_shutdown_requested = 1;
+ 	audio_thread_running = 0;
+@@ -111,8 +123,13 @@ static int audioThread(unsigned int args, void *arg) {
+ 		uint8_t *stream = audio_buffers[buf_idx];
+ 		buf_idx = (buf_idx + 1) % SndFile_NUMBUFS;
+ 
++        uint64_t begin=sceKernelGetProcessTimeWide();
+ 		fill_output_buffer(stream, (SLuint32)SndFile_BUFSIZE);
++        uint64_t mixed=sceKernelGetProcessTimeWide();
++        if(vita_audio_pcm)vita_audio_pcm((const short*)stream,SndFile_BUFSIZE/2);
+ 		res = sceAudioOutOutput(ch, stream);
++        if(vita_audio_timing)vita_audio_timing(mixed-begin,sceKernelGetProcessTimeWide()-mixed,
++            (uint64_t)(SndFile_BUFSIZE/4)*1000000/opensles_output_freq());
+ 		if (res < 0) {
+ 			SL_LOGE("Vita audio output failed on port %d: 0x%x", ch, res);
+ 			break;
+diff --git a/libopensles/VitaPcm.c b/libopensles/VitaPcm.c
+new file mode 100644
+index 0000000..7236018
+--- /dev/null
++++ b/libopensles/VitaPcm.c
+@@ -0,0 +1,115 @@
++#include "VitaPcm.h"
++#include <stdlib.h>
++#include <string.h>
++#include <limits.h>
++extern void vita_pcm_rate_trace(uint32_t,uint32_t,uint32_t) __attribute__((weak));
++void vita_pcm_destroy(VitaPcmState *state) {
++    if(state->resampler)speex_resampler_destroy(state->resampler);
++    memset(state,0,sizeof(*state));
++}
++void vita_pcm_reset(VitaPcmState *state) {
++    // Recreate on the next enqueue: this guarantees both channel histories
++    // and fractional positions are reset across Speex library versions.
++    vita_pcm_destroy(state);
++}
++int vita_pcm_convert(VitaPcmState *state,uint32_t input_millihz,uint32_t output_hz,
++    unsigned channels,unsigned bits,const void *source,uint32_t bytes,
++    const void **output,uint32_t *output_bytes,void **owned) {
++    *owned=NULL;*output=NULL;*output_bytes=0;
++    if(!source || !bytes || !input_millihz || !output_hz || output_hz>UINT32_MAX/1000 ||
++       (channels!=1 && channels!=2) || (bits!=8 && bits!=16))return -1;
++    unsigned frame_bytes=channels*(bits/8);
++    if(bytes%frame_bytes)return -1;
++    uint32_t frames=bytes/frame_bytes,output_millihz=output_hz*1000;
++    if(state->resampler && (state->input_millihz!=input_millihz || state->output_hz!=output_hz))
++        vita_pcm_destroy(state);
++    if(input_millihz==output_millihz && channels==2 && bits==16) {
++        *output=source;*output_bytes=bytes;return 0;
++    }
++    const int16_t *pcm=source;int16_t *normalized=NULL;
++    if(channels!=2 || bits!=16) {
++        if(frames>UINT32_MAX/4)return -1;
++        normalized=malloc((size_t)frames*4);
++        if(!normalized)return -2;
++        for(uint32_t f=0;f<frames;f++)for(unsigned c=0;c<2;c++) {
++            uint32_t index=f*channels+(channels==1?0:c);
++            int16_t value;
++            if(bits==8)value=((const uint8_t*)source)[index]*256-32768;
++            else memcpy(&value,(const uint8_t*)source+index*2,2);
++            normalized[f*2+c]=value;
++        }
++        pcm=normalized;
++    }
++    if(input_millihz==output_millihz) {
++        *owned=normalized;*output=normalized;*output_bytes=frames*4;return 0;
++    }
++    if(!state->resampler) {
++        int error;
++        state->resampler=speex_resampler_init_frac(2,input_millihz,output_millihz,
++            (input_millihz+500)/1000,output_hz,4,&error);
++        if(!state->resampler){free(normalized);return -2;}
++        state->input_millihz=input_millihz;state->output_hz=output_hz;
++        if(vita_pcm_rate_trace)vita_pcm_rate_trace(input_millihz,output_hz,
++            speex_resampler_get_output_latency(state->resampler));
++    }
++    // Preserve Speex's filter history and fractional phase across queue entries.
++    // Headroom covers the carried fractional output frame without truncating input.
++    uint64_t capacity=((uint64_t)frames*output_millihz+input_millihz-1)/input_millihz+64;
++    if(capacity>UINT32_MAX/4){free(normalized);return -1;}
++    int16_t *converted=malloc((size_t)capacity*4);
++    if(!converted){free(normalized);return -2;}
++    uint32_t offset=0,total=0;
++    int error=0;
++    // The Vita Speex PCM16 adapter uses stack scratch proportional to the
++    // requested output length. Bound each call for the game's 32 KB threads.
++    while(offset<frames) {
++        spx_uint32_t consumed=frames-offset>512?512:frames-offset;
++        spx_uint32_t produced=capacity-total>1024?1024:capacity-total;
++        if(!produced){error=-1;break;}
++        error=speex_resampler_process_interleaved_int(state->resampler,
++            pcm+offset*2,&consumed,converted+total*2,&produced);
++        if(error || (!consumed && !produced)){error=-1;break;}
++        offset+=consumed;total+=produced;
++    }
++    free(normalized);
++    if(error || offset!=frames){free(converted);return -3;}
++    *output=converted;*owned=converted;*output_bytes=total*4;
++    return 0;
++}
++
++int vita_pcm_render(VitaPcmState *state,uint32_t rate,uint32_t output_hz,unsigned channels,unsigned bits,
++    const void *src,uint32_t *in_bytes,int16_t *out,uint32_t *out_bytes) {
++    if(!src || !out || !rate || !output_hz || output_hz>UINT32_MAX/1000 ||
++       (channels!=1 && channels!=2) || (bits!=8 && bits!=16))return -1;
++    unsigned frame_bytes=channels*(bits/8);
++    if(*in_bytes%frame_bytes || *out_bytes<4)return -1;
++    uint32_t frames=*in_bytes/frame_bytes,capacity=*out_bytes/4;
++    if(frames>512)frames=512;if(capacity>1024)capacity=1024;
++    if(!frames){*in_bytes=*out_bytes=0;return 0;}
++    uint32_t output_rate=output_hz*1000;
++    if(state->resampler && (state->input_millihz!=rate || state->output_hz!=output_hz))vita_pcm_destroy(state);
++    if(rate==output_rate && frames>capacity)frames=capacity;
++    int16_t normalized[1024];const int16_t *pcm=src;
++    if(channels!=2 || bits!=16) {
++        for(uint32_t i=0;i<frames;i++)for(unsigned c=0;c<2;c++) {
++            uint32_t index=i*channels+(channels==1?0:c);int16_t value;
++            if(bits==8)value=((const uint8_t*)src)[index]*256-32768;
++            else memcpy(&value,(const uint8_t*)src+index*2,2);
++            normalized[i*2+c]=value;
++        }
++        pcm=normalized;
++    }
++    if(rate==output_rate) {
++        memcpy(out,pcm,frames*4);*in_bytes=frames*frame_bytes;*out_bytes=frames*4;return 0;
++    }
++    if(!state->resampler) {
++        int error;state->resampler=speex_resampler_init_frac(2,rate,output_rate,(rate+500)/1000,output_hz,4,&error);
++        if(!state->resampler)return -2;
++        state->input_millihz=rate;state->output_hz=output_hz;
++        if(vita_pcm_rate_trace)vita_pcm_rate_trace(rate,output_hz,speex_resampler_get_output_latency(state->resampler));
++    }
++    spx_uint32_t consumed=frames,produced=capacity;
++    int error=speex_resampler_process_interleaved_int(state->resampler,pcm,&consumed,out,&produced);
++    if(error || (!consumed && !produced))return -3;
++    *in_bytes=consumed*frame_bytes;*out_bytes=produced*4;return 0;
++}
+diff --git a/libopensles/VitaPcm.h b/libopensles/VitaPcm.h
+new file mode 100644
+index 0000000..cbb1a09
+--- /dev/null
++++ b/libopensles/VitaPcm.h
+@@ -0,0 +1,18 @@
++#pragma once
++#include <stdint.h>
++#include <speex/speex_resampler.h>
++typedef struct {
++    SpeexResamplerState *resampler;
++    uint32_t input_millihz, output_hz;
++} VitaPcmState;
++// Output is stereo PCM16. Equal-rate stereo PCM16 can borrow the source;
++// otherwise owned receives an allocation to release after playback.
++int vita_pcm_convert(VitaPcmState *state,uint32_t input_millihz,uint32_t output_hz,
++    unsigned channels,unsigned bits,const void *source,uint32_t bytes,
++    const void **output,uint32_t *output_bytes,void **owned);
++void vita_pcm_reset(VitaPcmState *state);
++void vita_pcm_destroy(VitaPcmState *state);
++// Render a bounded portion of a queued source buffer without allocating a full
++// resampled copy. in_bytes/out_bytes report bytes consumed/produced.
++int vita_pcm_render(VitaPcmState *,uint32_t,uint32_t,unsigned,unsigned,
++    const void *,uint32_t *,int16_t *,uint32_t *);
+diff --git a/libopensles/sles_allinclusive.h b/libopensles/sles_allinclusive.h
+index 851a5ee..c071cb5 100644
+--- a/libopensles/sles_allinclusive.h
++++ b/libopensles/sles_allinclusive.h
+@@ -24,6 +24,7 @@
+ #include <stdio.h>  // debugging
+ #include <assert.h> // debugging
+ #include <pthread.h>
++#include "VitaPcm.h"
+ #include <unistd.h> // usleep
+ #include <errno.h>
+ 
+@@ -495,6 +496,7 @@ typedef struct BufferQueue_interface {
+     // saves a malloc in the typical case
+ #define BUFFER_HEADER_TYPICAL 4
+     BufferHeader mTypical[BUFFER_HEADER_TYPICAL+1];
++	VitaPcmState pcm_state;
+ 	uint32_t samplerate;
+ 	int channels;
+ 	int bps;
+@@ -1351,6 +1353,7 @@ extern void audioPlayerTransportUpdate(CAudioPlayer *audioPlayer);
+ 
+ extern SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint32 size);
+ extern SLresult IBufferQueue_Clear(SLBufferQueueItf self);
++extern void IBufferQueue_ClearFromMixer(CAudioPlayer *player);
+ extern SLresult IBufferQueue_RegisterCallback(SLBufferQueueItf self,
+     slBufferQueueCallback callback, void *pContext);
+ extern void IBufferQueue_Destroy(IBufferQueue *this);
+@@ -1364,4 +1367,4 @@ extern void ReleaseStrongRefAndUnlockExclusive(IObject *object);
+ 
+ extern COutputMix *CAudioPlayer_GetOutputMix(CAudioPlayer *audioPlayer);
+ 
+-extern int _opensles_user_freq __attribute__((weak));
+\ No newline at end of file
++extern int _opensles_user_freq __attribute__((weak));
