@@ -6,6 +6,7 @@
 #include "sif.h"
 #include "fonts.h"
 #include "compat.h"
+#include "asset_pack.h"
 #include "jni_utf.h"
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/rng.h>
@@ -167,7 +168,18 @@ static int erase_tree(const char *path,unsigned depth){
     while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char child[1024];int n=snprintf(child,sizeof(child),"%s/%s",path,e->d_name);if(n<0||n>=sizeof(child)||erase_tree(child,depth+1)){result=-1;break;}}
     closedir(d);return result?result:rmdir(path);
 }
-jboolean sif_jp_eraseFolder(jmethodID id,va_list a){char *raw=string_copy(va_arg(a,jstring));const char *p=sif_io_path(raw);char *path=strdup(p);free(raw);if(!path)return 0;size_t n=strlen(path);while(n&&path[n-1]=='/')path[--n]=0;int allowed=(!strncmp(path,EXTERNAL_PATH,strlen(EXTERNAL_PATH))||!strncmp(path,DATA_PATH,strlen(DATA_PATH))) && !strstr(path,"..") && !strchr(path+4,':');int r=allowed && erase_tree(path,0)==0;free(path);return r;}
+jboolean sif_jp_eraseFolder(jmethodID id,va_list a){
+    char *raw=string_copy(va_arg(a,jstring));struct sif_asset_ref ref;
+    const char *p=sif_io_target(raw,&ref);char *path=p?strdup(p):NULL;free(raw);if(!path)return 0;
+    size_t n=strlen(path);while(n&&path[n-1]=='/')path[--n]=0;
+    /* Only strict descendants of the external tree or other loader data; the
+     * install tree and the roots themselves are never erased. */
+    int allowed=!strstr(path,"..") && !strchr(path+4,':') && strncmp(path,INSTALL_PATH,strlen(INSTALL_PATH)) &&
+        (!strncmp(path,EXTERNAL_PATH,strlen(EXTERNAL_PATH)) || (!strncmp(path,DATA_PATH,strlen(DATA_PATH)) && ref.root<0));
+    struct sif_pack_stat st;
+    if(allowed && sif_pack_stat(&ref,&st) && sif_pack_before_write(&ref,SIF_PACK_REMOVE)<0)allowed=0;
+    int r=allowed && erase_tree(path,0)==0;free(path);return r;
+}
 void sif_jp_shareContents(jmethodID id,va_list a){jstring cb=va_arg(a,jstring);share_cb(&jni,NULL,cb,JNI_FALSE,jni->NewStringUTF(&jni,"Unavailable"));}
 void sif_jp_savePng2Album(jmethodID id,va_list a){alert("Saving to the system photo album is unavailable in this port.");}
 void sif_jp_startObservation(jmethodID id,va_list a){if(!motion_active){int r=sceMotionStartSampling();motion_active=r>=0||r==SCE_MOTION_ERROR_ALREADY_SAMPLING;if(!motion_active)sif_log("Motion unavailable: %08x",r);}}

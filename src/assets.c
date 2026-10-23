@@ -1,4 +1,5 @@
 #include "sif.h"
+#include "asset_pack.h"
 #include "utils/utils.h"
 #include <minizip/unzip.h>
 #include <psp2/io/stat.h>
@@ -11,8 +12,12 @@
 #include <psp2/appmgr.h>
 #include <psp2/io/fcntl.h>
 void sif_prepare_external_path(void) {
-    if(sif_select_asset_paths()<0)sif_stop("Asset directory selection failed");
-    sif_log("Asset roots: install=%s external=%s",INSTALL_PATH,EXTERNAL_PATH);
+    sceIoMkdir(INSTALL_ROOT,0777);sceIoMkdir(EXTERNAL_ROOT,0777);
+    SceIoStat st;
+    if(sceIoGetstat(INSTALL_ROOT,&st)<0 || !SCE_S_ISDIR(st.st_mode) || sceIoGetstat(EXTERNAL_ROOT,&st)<0 || !SCE_S_ISDIR(st.st_mode))
+        sif_stop("Asset directories unavailable under " SIF_ROOT);
+    sif_pack_init();
+    sif_log("Asset roots: install=%s external=%s pack=%d",INSTALL_PATH,EXTERNAL_PATH,sif_pack_available());
 }
 static int valid_existing(const char *path,const unz_file_info *info,unsigned char *buf,size_t capacity) {
     SceIoStat st;
@@ -26,6 +31,7 @@ static int valid_existing(const char *path,const unz_file_info *info,unsigned ch
 // Match Android's install/external overlay layout. Game data remains supplied
 // separately; it is never part of the VPK.
 void sif_install_assets(void) {
+    if(sif_pack_has_root(SIF_ASSET_INSTALL)){sif_log("Install tree supplied by assets.bin");return;}
     if(file_exists(DATA_PATH "assets-v9.11.ready"))return;
     unzFile z=unzOpen(DATA_PATH "AppAssets.zip");
     if(!z)sif_stop("AppAssets.zip missing or invalid");
@@ -44,9 +50,13 @@ void sif_install_assets(void) {
         char check[768];strcpy(check,name);char *save=NULL;
         for(char *c=strtok_r(check,"/",&save);c;c=strtok_r(NULL,"/",&save))
             if(!strcmp(c,"..") || !strcmp(c,"."))sif_stop("Invalid ZIP path component");
-        snprintf(path,sizeof(path),"%s%s",INSTALL_PATH,name);
+        struct sif_asset_ref ref={.root=SIF_ASSET_INSTALL};
+        snprintf(ref.rel,sizeof(ref.rel),"%s",name);
+        size_t len=strlen(ref.rel);
+        while(len && ref.rel[len-1]=='/')ref.rel[--len]=0;
+        if(sif_asset_physical(&ref,path,sizeof(path))<0)sif_stop("Asset path too long");
         if(!file_mkpath(path,0777))sif_stop("Asset directory creation failed");
-        size_t len=strlen(name);
+        len=strlen(name);
         if(len && name[len-1]!='/') {
             if(valid_existing(path,&info,buf,sizeof(buf))) {
                 bytes+=info.uncompressed_size;files++;

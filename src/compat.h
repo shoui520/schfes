@@ -33,6 +33,9 @@ void sif_compressed_sub(unsigned,int,int,int,int,int,unsigned,int,const void*);
 extern unsigned sif_file_mask;
 int sif_mkdir(const char*,unsigned);
 const char *sif_io_path(const char*);
+struct sif_asset_ref;
+/* Physical path plus the asset reference used for assets.bin lookups. */
+const char *sif_io_target(const char*,struct sif_asset_ref*);
 int sif_access(const char*,int);
 int sif_unlink(const char*);
 int sif_rename(const char*,const char*);

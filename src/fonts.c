@@ -1,5 +1,6 @@
 #include "fonts.h"
 #include "sif.h"
+#include "reimpl/io.h"
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_SYNTHESIS_H
@@ -12,6 +13,23 @@ struct Face {char name[256];FT_Face face;};
 static struct Face faces[8];
 struct Metrics {uint32_t magic;float ascent,descent,top,bottom,leading;};
 struct Paint {uint32_t magic;FT_Face face;float size;int antialias,bold;struct Metrics metrics;};
+/* Faces stream through the game's file bridge so assets.bin can supply them. */
+static unsigned long font_read(FT_Stream s,unsigned long offset,unsigned char *buf,unsigned long count) {
+    FILE *f=s->descriptor.pointer;
+    if(fseek(f,offset,SEEK_SET))return count?0:1;
+    return count?fread(buf,1,count,f):0;
+}
+static void font_close(FT_Stream s) { fclose(s->descriptor.pointer);free(s); }
+static int open_font(const char *name,FT_Face *face) {
+    char path[1024];snprintf(path,sizeof(path),"%s%s",INSTALL_PATH,name);
+    FILE *f=fopen_soloader(path,"rb");if(!f)return -1;
+    FT_Stream s=calloc(1,sizeof(*s));
+    if(!s || fseek(f,0,SEEK_END)){free(s);fclose(f);return -1;}
+    s->size=ftell(f);s->descriptor.pointer=f;s->read=font_read;s->close=font_close;
+    FT_Open_Args args={.flags=FT_OPEN_STREAM,.stream=s};
+    /* FreeType closes the stream itself when opening fails. */
+    return FT_Open_Face(ft,&args,0,face)?-1:0;
+}
 #define PAINT_MAGIC 0x5041494e
 #define METRICS_MAGIC 0x464d4554
 static struct Paint *paint_arg(va_list a) {
@@ -29,8 +47,8 @@ jobject sif_paint_create(jmethodID id,va_list a) {
     FT_Face face=NULL;int empty=-1;
     for(int i=0;i<8;i++) {if(faces[i].face && !strcmp(faces[i].name,text))face=faces[i].face;if(!faces[i].face && empty<0)empty=i;}
     if(!face) {
-        if(empty<0)sif_stop("Font face cache full");char path[1024];snprintf(path,sizeof(path),"%s%s",INSTALL_PATH,text);
-        if(FT_New_Face(ft,path,0,&face)) {sif_log("Font load failed: %s",text);sif_stop("Font asset unavailable");}
+        if(empty<0)sif_stop("Font face cache full");
+        if(open_font(text,&face)) {sif_log("Font load failed: %s",text);sif_stop("Font asset unavailable");}
         strncpy(faces[empty].name,text,sizeof(faces[empty].name)-1);faces[empty].face=face;
         sif_log("Font loaded %s glyphs=%ld",text,face->num_glyphs);
     }
@@ -105,8 +123,7 @@ void sif_font_widget(jobject object,const char *text,unsigned *pixels,int w,int 
         if(!fallback.magic){
             if(!ft && FT_Init_FreeType(&ft))sif_stop("Widget font init failed");
             FT_Face face;
-            char path[1024];snprintf(path,sizeof(path),"%sMTLmr3m.ttf",INSTALL_PATH);
-            if(FT_New_Face(ft,path,0,&face))sif_stop("Widget font unavailable");
+            if(open_font("MTLmr3m.ttf",&face))sif_stop("Widget font unavailable");
             fallback=(struct Paint){.magic=PAINT_MAGIC,.face=face,.size=20,.antialias=1};
         }
         p=&fallback;

@@ -1,5 +1,6 @@
 #include "sif.h"
 #include "compat.h"
+#include "asset_pack.h"
 #include <psp2/appmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
@@ -84,31 +85,78 @@ long sif_sysconf(int name) {
 }
 unsigned sif_file_mask=022;
 unsigned sif_umask(unsigned mask) { return __sync_lock_test_and_set(&sif_file_mask,mask&0777); }
-const char *sif_io_path(const char *path) {
+static const char *mount_path(const char *path) {
     // Embedded Unix VFS code treats a Vita mount path as relative and prefixes
     // getcwd(). The captured database failure is app0:/ux0:/data/.... Resolve
     // that representation at the host filesystem boundary, keeping other
     // relative paths and native mount paths intact.
-    if(!path)return NULL;
     const char *candidate=path;
     if(!strncmp(candidate,"app0:/",6))candidate+=6;
     else if(*candidate=='/')candidate++;
     if(candidate!=path && (!strncmp(candidate,"ux0:",4) || !strncmp(candidate,"app0:/",6))) {
         sif_log("Filesystem mount path: %s -> %s",path,candidate);
+        return candidate;
     }
-    else candidate=path;
-    const char *resolved=sif_resolve_asset_path(candidate);
-    if(!resolved)sif_stop("Asset path exceeds bridge capacity");
-    return resolved;
+    return path;
 }
-int sif_access(const char *path,int mode) {return access(sif_io_path(path),mode);}
-int sif_remove(const char *path) {return remove(sif_io_path(path));}
-int sif_rmdir(const char *path) {return rmdir(sif_io_path(path));}
-int sif_unlink(const char *path) {return unlink(sif_io_path(path));}
-int sif_rename(const char *old,const char *next) {return rename(sif_io_path(old),sif_io_path(next));}
-int sif_mkdir(const char *path,unsigned mode) { return mkdir(sif_io_path(path),mode&~sif_file_mask); }
+const char *sif_io_target(const char *path,struct sif_asset_ref *ref) {
+    static _Thread_local char mapped[4][1100];
+    static _Thread_local unsigned next;
+    ref->root=SIF_ASSET_NONE;
+    if(!path)return NULL;
+    path=mount_path(path);
+    if(sif_asset_split(path,ref)==SIF_ASSET_NONE)return path;
+    char *out=mapped[next++%4];
+    if(sif_asset_physical(ref,out,sizeof(mapped[0]))<0)sif_stop("Asset path exceeds bridge capacity");
+    return out;
+}
+const char *sif_io_path(const char *path) {
+    struct sif_asset_ref ref;
+    return sif_io_target(path,&ref);
+}
+int sif_access(const char *path,int mode) {
+    struct sif_asset_ref ref;struct sif_pack_stat st;
+    path=sif_io_target(path,&ref);
+    return sif_pack_stat(&ref,&st)?0:access(path,mode);
+}
+/* A pack entry that is removed is shadowed; it never existed loose, so a
+ * missing loose copy still means success. */
+static int remove_path(const char *path,int (*op)(const char*)) {
+    struct sif_asset_ref ref;struct sif_pack_stat st;
+    path=sif_io_target(path,&ref);
+    int packed=sif_pack_stat(&ref,&st);
+    if(packed && sif_pack_before_write(&ref,SIF_PACK_REMOVE)<0)return -1;
+    int r=op(path);
+    if(r<0 && packed && errno==ENOENT)return 0;
+    return r;
+}
+int sif_remove(const char *path) {return remove_path(path,remove);}
+int sif_rmdir(const char *path) {return remove_path(path,rmdir);}
+int sif_unlink(const char *path) {return remove_path(path,unlink);}
+int sif_rename(const char *old,const char *next) {
+    struct sif_asset_ref from,to;struct sif_pack_stat st;
+    old=sif_io_target(old,&from);next=sif_io_target(next,&to);
+    if(sif_pack_stat(&from,&st) && st.directory) {
+        sif_log("rename of packed directory %s is unsupported",old);
+        errno=EXDEV;return -1;
+    }
+    if(sif_pack_before_write(&from,SIF_PACK_MODIFY)<0 || sif_pack_before_write(&to,SIF_PACK_REPLACE)<0)return -1;
+    int r=rename(old,next);
+    if(r<0 && errno==ENOENT && to.root>=0 && sif_pack_make_parents(next)==0)r=rename(old,next);
+    return r;
+}
+int sif_mkdir(const char *path,unsigned mode) {
+    struct sif_asset_ref ref;struct sif_pack_stat st;
+    path=sif_io_target(path,&ref);
+    if(sif_pack_stat(&ref,&st)){errno=EEXIST;return -1;}
+    int r=mkdir(path,mode&~sif_file_mask);
+    if(r<0 && errno==ENOENT && ref.root>=0 && sif_pack_make_parents(path)==0)r=mkdir(path,mode&~sif_file_mask);
+    return r;
+}
 int sif_utimes(const char *path,const struct sif_time32 *tv) {
-    path=sif_io_path(path);
+    struct sif_asset_ref ref;struct sif_pack_stat st;
+    path=sif_io_target(path,&ref);
+    if(sif_pack_stat(&ref,&st))return 0;
     if(!tv)return utimes(path,NULL);
     struct timeval t[2]={{tv[0].sec,tv[0].sub},{tv[1].sec,tv[1].sub}};
     return utimes(path,t);

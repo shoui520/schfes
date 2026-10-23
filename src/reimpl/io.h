@@ -97,6 +97,16 @@ int ioctl_soloader(int fd, int request, ... /* arg */);
 
 int fsync_soloader(int fd);
 
+ssize_t read_soloader(int fd, void *buf, size_t n);
+
+ssize_t write_soloader(int fd, const void *buf, size_t n);
+
+off_t lseek_soloader(int fd, off_t offset, int whence);
+
+int ftruncate_soloader(int fd, off_t length);
+
+FILE * fdopen_soloader(int fd, const char * mode);
+
 #ifdef __cplusplus
 };
 #endif

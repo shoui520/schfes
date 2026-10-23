@@ -10,6 +10,7 @@
 #include "reimpl/io.h"
 #include "compat.h"
 #include "stdio_bridge.h"
+#include "asset_pack.h"
 #include <errno.h>
 
 #include <string.h>
@@ -41,21 +42,27 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
 #ifdef SIF_PRIVATE_DIAGNOSTICS
     uint64_t started=sceKernelGetProcessTimeWide();
 #endif
-    filename=sif_io_path(filename);
+    struct sif_asset_ref ref;
+    filename=sif_io_target(filename,&ref);
     if (strcmp(filename, "/proc/cpuinfo") == 0) {
         return fopen_soloader("app0:/cpuinfo", mode);
     } else if (strcmp(filename, "/proc/meminfo") == 0) {
         return fopen_soloader("app0:/meminfo", mode);
     }
 
-#ifdef USE_SCELIBC_IO
-    FILE* ret = sceLibcBridge_fopen(filename, mode);
-#else
-    FILE* ret = fopen(filename, mode);
-    if(ret && (!strcmp(mode,"r") || !strcmp(mode,"rb")) &&
-       (!strncmp(filename,"ux0:/",5) || !strncmp(filename,"app0:/",6)))
-        sif_prepare_read_file(ret);
-#endif
+    FILE* ret;
+    if (!sif_pack_fopen(&ref, mode, &ret)) {
+        ret = fopen(filename, mode);
+        /* Collapsed or pack-only parents have no loose directory yet. */
+        if (!ret && errno == ENOENT && ref.root >= 0 && strpbrk(mode, "wa") &&
+            sif_pack_make_parents(filename) == 0)
+            ret = fopen(filename, mode);
+        else if (!ret && errno == ENOENT && !strpbrk(mode, "wa+") && sif_asset_uncollapsed(&ref))
+            ret = fopen(filename = sif_asset_uncollapsed(&ref), mode);
+        if(ret && (!strcmp(mode,"r") || !strcmp(mode,"rb")) &&
+           (!strncmp(filename,"ux0:/",5) || !strncmp(filename,"app0:/",6)))
+            sif_prepare_read_file(ret);
+    }
 
 #ifdef SIF_PRIVATE_DIAGNOSTICS
     extern void sif_diagnostic_file(FILE*,const char*);
@@ -72,7 +79,8 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
 }
 
 int open_soloader(const char * path, int oflag, ...) {
-    path=sif_io_path(path);
+    struct sif_asset_ref ref;
+    path=sif_io_target(path,&ref);
     if (strcmp(path, "/proc/cpuinfo") == 0) {
         return open_soloader("app0:/cpuinfo", oflag);
     } else if (strcmp(path, "/proc/meminfo") == 0) {
@@ -91,7 +99,15 @@ int open_soloader(const char * path, int oflag, ...) {
     }
 
     oflag = oflags_bionic_to_newlib(oflag);
-    int ret = open(path, oflag, mode&~sif_file_mask);
+    int ret;
+    if (!sif_pack_open(&ref, oflag, &ret)) {
+        ret = open(path, oflag, mode&~sif_file_mask);
+        if (ret < 0 && errno == ENOENT && ref.root >= 0 && (oflag & O_CREAT) &&
+            sif_pack_make_parents(path) == 0)
+            ret = open(path, oflag, mode&~sif_file_mask);
+        else if (ret < 0 && errno == ENOENT && (oflag & O_ACCMODE) == O_RDONLY && sif_asset_uncollapsed(&ref))
+            ret = open(path = sif_asset_uncollapsed(&ref), oflag, mode&~sif_file_mask);
+    }
     if (ret >= 0)
         l_debug("open(%s, %x): %i", path, oflag, ret);
     else {
@@ -102,7 +118,25 @@ int open_soloader(const char * path, int oflag, ...) {
     return ret;
 }
 
+static void pack_stat(int directory, uint32_t size, uint32_t mtime, stat64_bionic * buf) {
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    st.st_mode = directory ? S_IFDIR | 0777 : S_IFREG | 0666;
+    st.st_nlink = 1;
+    st.st_size = size;
+    st.st_blksize = 16384;
+    st.st_blocks = (size + 511) / 512;
+    st.st_atime = st.st_mtime = st.st_ctime = mtime;
+    stat_newlib_to_bionic(&st, buf);
+}
+
 int fstat_soloader(int fd, stat64_bionic * buf) {
+    if (sif_pack_is_fd(fd)) {
+        uint32_t size, mtime;
+        sif_pack_fstat(fd, &size, &mtime);
+        pack_stat(0, size, mtime, buf);
+        return 0;
+    }
     struct stat st;
 #ifdef SIF_PRIVATE_DIAGNOSTICS
     uint64_t started=sceKernelGetProcessTimeWide();
@@ -121,14 +155,22 @@ int fstat_soloader(int fd, stat64_bionic * buf) {
 }
 
 int stat_soloader(const char * path, stat64_bionic * buf) {
-    path=sif_io_path(path);
+    struct sif_asset_ref ref;
+    path=sif_io_target(path,&ref);
     if (strcmp(path, "/system/lib/libOpenSLES.so") == 0) {
         l_debug("stat(%s): returning 0 in case this is a check for OpenSLES support", path);
+        return 0;
+    }
+    struct sif_pack_stat packed;
+    if (sif_pack_stat(&ref, &packed)) {
+        pack_stat(packed.directory, packed.size, packed.mtime, buf);
         return 0;
     }
 
     struct stat st;
     int res = stat(path, &st);
+    if (res < 0 && errno == ENOENT && sif_asset_uncollapsed(&ref))
+        res = stat(sif_asset_uncollapsed(&ref), &st);
 
     if (res == 0)
         stat_newlib_to_bionic(&st, buf);
@@ -150,19 +192,42 @@ int fclose_soloader(FILE * f) {
 }
 
 int close_soloader(int fd) {
+    if (sif_pack_is_fd(fd)) {
+        sif_pack_close(fd);
+        return 0;
+    }
     int ret = close(fd);
     l_debug("close(%i): %i", fd, ret);
     return ret;
 }
 
 DIR* opendir_soloader(char* _pathname) {
-    DIR* ret = opendir(sif_io_path(_pathname));
+    struct sif_asset_ref ref;
+    const char *path = sif_io_target(_pathname, &ref);
+    DIR* ret = sif_pack_opendir(&ref, path);
+    if (ret == (DIR*)-1)
+        ret = NULL;
+    else if (!ret)
+        ret = opendir(path);
     l_debug("opendir(\"%s\"): %p", _pathname, ret);
     return ret;
 }
 
+static dirent64_bionic * pack_dirent(DIR * dir, dirent64_bionic * out) {
+    unsigned char type;
+    const char *name = sif_pack_readdir(dir, &type);
+    if (!name)
+        return NULL;
+    memset(out, 0, sizeof(*out));
+    strncpy(out->d_name, name, sizeof(out->d_name) - 1);
+    out->d_type = type;
+    return out;
+}
+
 struct dirent64_bionic * readdir_soloader(DIR * dir) {
     static struct dirent64_bionic dirent_tmp;
+    if (sif_pack_is_dir(dir))
+        return pack_dirent(dir, &dirent_tmp);
 
     struct dirent* ret = readdir(dir);
     l_debug("readdir(%p): %p", dir, ret);
@@ -179,6 +244,10 @@ struct dirent64_bionic * readdir_soloader(DIR * dir) {
 
 int readdir_r_soloader(DIR * dirp, dirent64_bionic * entry,
                        dirent64_bionic ** result) {
+    if (sif_pack_is_dir(dirp)) {
+        *result = pack_dirent(dirp, entry);
+        return 0;
+    }
     struct dirent dirent_tmp;
     struct dirent * pdirent_tmp;
 
@@ -196,6 +265,10 @@ int readdir_r_soloader(DIR * dirp, dirent64_bionic * entry,
 }
 
 int closedir_soloader(DIR * dir) {
+    if (sif_pack_is_dir(dir)) {
+        sif_pack_closedir(dir);
+        return 0;
+    }
     int ret = closedir(dir);
     l_debug("closedir(%p): %i", dir, ret);
     return ret;
@@ -232,4 +305,32 @@ int fsync_soloader(int fd) {
     int ret = fsync(fd);
     l_debug("fsync(%i): %i", fd, ret);
     return ret;
+}
+
+ssize_t read_soloader(int fd, void *buf, size_t n) {
+    return sif_pack_is_fd(fd) ? sif_pack_read(fd, buf, n) : read(fd, buf, n);
+}
+
+ssize_t write_soloader(int fd, const void *buf, size_t n) {
+    if (sif_pack_is_fd(fd)) {
+        errno = EBADF;
+        return -1;
+    }
+    return write(fd, buf, n);
+}
+
+off_t lseek_soloader(int fd, off_t offset, int whence) {
+    return sif_pack_is_fd(fd) ? sif_pack_lseek(fd, offset, whence) : lseek(fd, offset, whence);
+}
+
+int ftruncate_soloader(int fd, off_t length) {
+    if (sif_pack_is_fd(fd)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ftruncate(fd, length);
+}
+
+FILE * fdopen_soloader(int fd, const char * mode) {
+    return sif_pack_is_fd(fd) ? sif_pack_fdopen(fd, mode) : fdopen(fd, mode);
 }
