@@ -23,6 +23,7 @@
 extern so_module so_mod;
 void sif_log(const char *fmt,...) __attribute__((format(printf,1,2)));
 void sif_stop(const char *reason) __attribute__((noreturn));
+void sif_write_server_info(void);
 int resolve_imports(so_module *mod);
 void sif_java_init(void);
 void sif_java_check_method(const char *name,const char *signature);

@@ -13,8 +13,9 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfloat-abi=softfp -O1 -g3 -std=gnu11 -D_GNU
 # floating parameters/returns enter explicit pcs(aapcs) wrappers in these units.
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-warn-mismatch")
 include(third_party/Dependencies.cmake)
+add_subdirectory(src/server)
 add_executable(sif_vita
- src/preferences.c src/poll_bridge.c src/net_bridge.c src/crypto.c src/stdio_bridge.c src/input.c src/fonts.c src/assets.c src/asset_paths.c src/asset_pack.c src/compat.c src/main.c src/dynlib.c src/java.c src/java_platform.c src/java_overlay.c src/gl_bridge.c src/math_bridge.c
+ src/preferences.c src/server_info.c src/thread_affinity.c src/poll_bridge.c src/net_bridge.c src/crypto.c src/stdio_bridge.c src/input.c src/fonts.c src/assets.c src/asset_paths.c src/asset_pack.c src/compat.c src/main.c src/dynlib.c src/java.c src/java_platform.c src/java_overlay.c src/gl_bridge.c src/math_bridge.c
  src/utils/logger.c src/utils/utils.c
  src/reimpl/bits/_ctype.c src/reimpl/errno.c src/reimpl/io.c
  src/reimpl/log.c src/reimpl/mem.c src/reimpl/pthr.c src/reimpl/sys.c src/reimpl/time64.c
@@ -36,7 +37,8 @@ endif()
 if(SIF_STALL_DIAGNOSTICS)
  target_compile_definitions(sif_vita PRIVATE SIF_STALL_DIAGNOSTICS)
 endif()
-target_link_libraries(sif_vita -Wl,--whole-archive pthread -Wl,--no-whole-archive
+target_link_libraries(sif_vita -Wl,--wrap=sceKernelCreateThread npps
+ -Wl,--whole-archive pthread -Wl,--no-whole-archive
  sif_opensles speexdsp sndfile mp3lame mpg123 opus vorbis ogg vorbisenc vorbisfile FLAC
  sif_vitagl vitashark SceShaccCgExt taihen_stub SceShaccCg_stub
  stdc++ freetype png16 minizip ppmd bz2 lzma zstd crypto z mathneon m kubridge_stub ScePgf_stub SceRtc_stub SceHid_stub SceTouch_stub SceMotion_stub
@@ -51,4 +53,5 @@ vita_create_vpk(sif_vita.vpk SIFV00001 eboot.bin VERSION 00.01 NAME "スクフ�
  FILE ${SIF_PACKAGE_ASSETS}/livearea/icon0.png sce_sys/icon0.png
  ${SIF_PACKAGE_ASSETS}/livearea/startup.png sce_sys/livearea/contents/startup.png
  ${SIF_PACKAGE_ASSETS}/livearea/bg0.png sce_sys/livearea/contents/bg0.png
- ${SIF_PACKAGE_ASSETS}/livearea/template.xml sce_sys/livearea/contents/template.xml)
+ ${SIF_PACKAGE_ASSETS}/livearea/template.xml sce_sys/livearea/contents/template.xml
+ ${NPPS_PACKAGE_DIR} npps)

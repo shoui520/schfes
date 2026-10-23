@@ -1,10 +1,12 @@
 #include "sif.h"
 #include "java_platform.h"
+#include "npps_server.h"
 #include "utils/utils.h"
 #include <falso_jni/FalsoJNI.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/power.h>
@@ -95,6 +97,11 @@ int main(void) {
         sif_stop("ur0:data/libshacccg.suprx missing");
     verify_game();
     sif_prepare_external_path();
+    // The render loop keeps CPU0; other game threads get CPU0/1 and the
+    // server owns CPU2 (src/thread_affinity.c).
+    sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(),SCE_KERNEL_CPU_MASK_USER_0);
+    sif_write_server_info();
+    if(sif_server_start()<0)sif_stop("server start failed");
     // A fixed 6 MiB mapping outside the initial host heap; kernel rejects overlap.
     int r=so_file_load(&so_mod,SO_PATH,0x98000000);
     sif_log("so_file_load=%d text=%08x size=%u data=%08x size=%u",r,(unsigned)so_mod.text_base,(unsigned)so_mod.text_size,(unsigned)so_mod.data_base[0],(unsigned)so_mod.data_size[0]);
