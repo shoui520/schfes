@@ -1,7 +1,8 @@
 # schfes
 
 ラブライブ! スクールアイドルフェスティバル (Love Live! School Idol Festival/SIF/スクフェス) experimental port targeting PS Vita.  
-Based on `lovelive-community`. Currently depends on hosting a NPPS4 private server and having both the apk assets and server-fetched external assets for version 59.4 on-device. These will not be provided in this repository.  
+Based on `lovelive-community`. Runs a C++ port of the NPPS4 private server inside the game (`src/server`), so no separate server is needed. Requires both the apk assets and server-fetched external assets for version 59.4 on-device, in `ux0:data/sif/sif-install` and `ux0:data/sif/sif-external` (or packed into `ux0:data/sif/assets.bin` with `tools/sifpack.py`). These will not be provided in this repository.  
+Building needs an NPPS4 checkout for its server data, beatmaps and server key: `-DNPPS4_SOURCE_DIR=/path/to/NPPS4`.  
 
 
 
