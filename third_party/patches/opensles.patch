@@ -321,7 +321,7 @@ index 62961ae..deb90db 100644
              }
          }
 diff --git a/libopensles/Vita.c b/libopensles/Vita.c
-index caa1a40..8a23197 100644
+index caa1a40..783a753 100644
 --- a/libopensles/Vita.c
 +++ b/libopensles/Vita.c
 @@ -33,8 +33,20 @@ static int audio_thread_valid;
@@ -345,7 +345,26 @@ index caa1a40..8a23197 100644
  static void reset_audio_backend_state(void) {
  	audio_shutdown_requested = 1;
  	audio_thread_running = 0;
-@@ -111,8 +123,13 @@ static int audioThread(unsigned int args, void *arg) {
+@@ -95,6 +107,18 @@ static int audioThread(unsigned int args, void *arg) {
+ 	audio_thread_running = 1;
+ 	int res;
+ 
++	/* A 128-frame period is 2.9 ms, so the mixer must never wait behind game
++	 * work. Its share per period is well under a millisecond; run it above
++	 * every game thread and let it use the server's core as well. */
++	SceUID self = sceKernelGetThreadId();
++	res = sceKernelChangeThreadPriority(self, 64);
++	if (res < 0)
++		SL_LOGE("Unable to raise Vita audio thread priority: 0x%x", res);
++	res = sceKernelChangeThreadCpuAffinityMask(self,
++			SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2);
++	if (res < 0)
++		SL_LOGE("Unable to set Vita audio thread affinity: 0x%x", res);
++
+ 	int vol_stereo[] = {32767, 32767};
+ 	res = sceAudioOutSetVolume(
+ 			ch,
+@@ -111,8 +135,13 @@ static int audioThread(unsigned int args, void *arg) {
  		uint8_t *stream = audio_buffers[buf_idx];
  		buf_idx = (buf_idx + 1) % SndFile_NUMBUFS;
  
