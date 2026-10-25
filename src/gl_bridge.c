@@ -78,13 +78,20 @@ void sif_glTexImage2D(GLenum target,GLint level,GLint internal,GLsizei width,GLs
         target,level,internal,width,height,border,format,type,pixels);
     glTexImage2D(target,level,internal,width,height,border,format,type,pixels);
 }
+/* The engine clears to pure green and presents those empty frames while its
+ * first textures load, which on Vita takes long enough to be seen. Until the
+ * first draw, clear to black; the requested color applies from then on. */
+static int drawn;
+static float boot_clear[4];
 SOFT_ENTRY void sif_glClearColor(float r,float g,float b,float a) {
     static unsigned calls;
     if(calls++<8)sif_log("GL clear color %.3f %.3f %.3f %.3f",r,g,b,a);
+    if(!drawn){boot_clear[0]=r;boot_clear[1]=g;boot_clear[2]=b;boot_clear[3]=a;glClearColor(0,0,0,1);return;}
     glClearColor(r,g,b,a);
 }
 void sif_glDrawElements(GLenum mode,GLsizei count,GLenum type,const void *indices) {
     static unsigned calls;
+    if(!drawn){drawn=1;glClearColor(boot_clear[0],boot_clear[1],boot_clear[2],boot_clear[3]);}
     if(calls<3 || calls==300)trace_vertex_inputs(type,count,indices);
     if(calls++<12) {
         GLint program=0,fb=0,viewport[4]={0},scissor[4]={0},array=0,elements=0;
