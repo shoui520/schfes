@@ -167,7 +167,7 @@ static void stock_info(jmethodID id,va_list a) {
     const char *k=key?jni->GetStringUTFChars(&jni,key,NULL):NULL;
     const char *v=value?jni->GetStringUTFChars(&jni,value,NULL):NULL;
     if((key && !k) || (value && !v))sif_stop("Backtrace string conversion failed");
-    sif_log("Backtrace attribute: %.128s",k?k:"null");
+    sif_log("Backtrace attribute: %.64s=%.192s",k?k:"null",v?v:"null");
     if(k)jni->ReleaseStringUTFChars(&jni,key,(char*)k);
     if(v)jni->ReleaseStringUTFChars(&jni,value,(char*)v);
 }
