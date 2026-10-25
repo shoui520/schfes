@@ -1,5 +1,5 @@
 diff --git a/libopensles/IBufferQueue.c b/libopensles/IBufferQueue.c
-index baf95fe..91924be 100644
+index baf95fe..50dc89a 100644
 --- a/libopensles/IBufferQueue.c
 +++ b/libopensles/IBufferQueue.c
 @@ -17,6 +17,8 @@
@@ -94,11 +94,11 @@ index baf95fe..91924be 100644
              this->mRear = newRear;
              ++this->mState.count;
              if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
-@@ -159,6 +103,23 @@ fail:
+@@ -159,12 +103,33 @@ fail:
  }
  
  
-+// Called with the player locked, only by the mixer (including its callbacks).
++// Called with the mixer render lock held and the player locked.
 +void IBufferQueue_ClearFromMixer(CAudioPlayer *player)
 +{
 +    IBufferQueue *queue = &player->mBufferQueue;
@@ -113,32 +113,47 @@ index baf95fe..91924be 100644
 +    }
 +}
 +
-+extern int vita_is_mixer_thread(void);
++extern void vita_mixer_lock(void);
++extern void vita_mixer_unlock(void);
 +
  SLresult IBufferQueue_Clear(SLBufferQueueItf self)
  {
      SL_ENTER_INTERFACE
-@@ -186,10 +147,15 @@ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
+ 
+     result = SL_RESULT_SUCCESS;
+     IBufferQueue *this = (IBufferQueue *) self;
++#ifdef USE_OUTPUTMIXEXT
++    vita_mixer_lock();
++#endif
+     interface_lock_exclusive(this);
+ 
+ #ifdef ANDROID
+@@ -184,15 +149,18 @@ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
+ #endif
+ 
  #ifdef USE_OUTPUTMIXEXT
-     // mixer might be reading from the front buffer, so tread carefully here
-     // NTH asynchronous cancel instead of blocking until mixer acknowledges
+-    // mixer might be reading from the front buffer, so tread carefully here
+-    // NTH asynchronous cancel instead of blocking until mixer acknowledges
 -    this->mClearRequested = SL_BOOLEAN_TRUE;
 -    do {
 -        interface_cond_wait(this);
 -    } while (this->mClearRequested);
-+    if (vita_is_mixer_thread() && SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
++    // The render lock keeps the mixer off the front buffer. Waiting for the
++    // mixer instead can deadlock: the caller may hold a lock that a buffer
++    // callback, running on the mixer, is waiting for.
++    if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
 +        IBufferQueue_ClearFromMixer((CAudioPlayer *)this->mThis);
-+        interface_cond_broadcast(this);
-+    } else {
-+        this->mClearRequested = SL_BOOLEAN_TRUE;
-+        do {
-+            interface_cond_wait(this);
-+        } while (this->mClearRequested);
 +    }
  #endif
  
      interface_unlock_exclusive(this);
-@@ -257,6 +223,7 @@ void IBufferQueue_init(void *self)
++#ifdef USE_OUTPUTMIXEXT
++    vita_mixer_unlock();
++#endif
+ 
+     SL_LEAVE_INTERFACE
+ }
+@@ -257,6 +225,7 @@ void IBufferQueue_init(void *self)
  {
      //SL_LOGV("IBufferQueue_init(%p) entering", self);
      IBufferQueue *this = (IBufferQueue *) self;
@@ -146,7 +161,7 @@ index baf95fe..91924be 100644
      this->mItf = &IBufferQueue_Itf;
      this->mState.count = 0;
      this->mState.playIndex = 0;
-@@ -284,6 +251,7 @@ void IBufferQueue_init(void *self)
+@@ -284,6 +253,7 @@ void IBufferQueue_init(void *self)
  
  void IBufferQueue_Destroy(IBufferQueue *this)
  {
@@ -170,20 +185,49 @@ index 4d3e27f..3d1acac 100644
                      // during Realize or Prefetch
                      this->mNumChannels = 0;
 diff --git a/libopensles/IOutputMixExt.c b/libopensles/IOutputMixExt.c
-index 7941cdd..cf969e8 100644
+index 7941cdd..eba4042 100644
 --- a/libopensles/IOutputMixExt.c
 +++ b/libopensles/IOutputMixExt.c
-@@ -17,6 +17,9 @@
+@@ -17,6 +17,11 @@
  /* OutputMixExt implementation */
  
  #include "sles_allinclusive.h"
 +#include <psp2/kernel/processmgr.h>
 +extern void vita_audio_track(unsigned,int,int,unsigned,int,int) __attribute__((weak));
 +extern void vita_audio_work(unsigned,unsigned,unsigned) __attribute__((weak));
++extern void vita_mixer_lock(void);
++extern void vita_mixer_unlock(void);
  #include <math.h>
  
  
-@@ -93,14 +96,7 @@ static SLboolean track_check(Track *track)
+@@ -54,6 +59,26 @@ static Summary summarize_gain(float gain)
+ 
+ /** \brief Check whether a track has any data for us to read */
+ 
++// Called with the mixer render lock held and the player locked.
++void IOutputMixExt_StopPlayer(CAudioPlayer *audioPlayer)
++{
++    audioPlayer->mPlay.mPosition = (SLmillisecond) 0;
++    audioPlayer->mPlay.mFramesSinceLastSeek = 0;
++    audioPlayer->mPlay.mFramesSincePositionUpdate = 0;
++    audioPlayer->mPlay.mLastSeekPosition = 0;
++    audioPlayer->mPlay.mState = SL_PLAYSTATE_STOPPED;
++    // stop cancels a pending seek
++    audioPlayer->mSeek.mPos = SL_TIME_UNKNOWN;
++    Track *track = audioPlayer->mTrack;
++    const BufferHeader *oldFront = audioPlayer->mBufferQueue.mFront;
++    if (NULL != track && oldFront != audioPlayer->mBufferQueue.mRear) {
++        assert(0 < audioPlayer->mBufferQueue.mState.count);
++        track->mReader = oldFront->mBuffer;
++        track->mAvail = oldFront->mSize;
++    }
++}
++
++
+ static SLboolean track_check(Track *track)
+ {
+     assert(NULL != track);
+@@ -93,14 +118,7 @@ static SLboolean track_check(Track *track)
          if (audioPlayer->mBufferQueue.mClearRequested) {
              // application thread(s) that call BufferQueue::Clear while mixer is active
              // will block synchronously until mixer acknowledges the Clear request
@@ -199,7 +243,7 @@ index 7941cdd..cf969e8 100644
              doBroadcast = SL_BOOLEAN_TRUE;
          }
  
-@@ -123,6 +119,10 @@ static SLboolean track_check(Track *track)
+@@ -123,6 +141,10 @@ static SLboolean track_check(Track *track)
          switch (audioPlayer->mPlay.mState) {
  
          case SL_PLAYSTATE_PLAYING:  // continue playing current track data
@@ -210,7 +254,52 @@ index 7941cdd..cf969e8 100644
              if (0 < track->mAvail) {
                  trackHasData = SL_BOOLEAN_TRUE;
                  break;
-@@ -290,17 +290,27 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+@@ -160,19 +182,7 @@ static SLboolean track_check(Track *track)
+             break;
+ 
+         case SL_PLAYSTATE_STOPPING: // application thread(s) called Play::SetPlayState(STOPPED)
+-            audioPlayer->mPlay.mPosition = (SLmillisecond) 0;
+-            audioPlayer->mPlay.mFramesSinceLastSeek = 0;
+-            audioPlayer->mPlay.mFramesSincePositionUpdate = 0;
+-            audioPlayer->mPlay.mLastSeekPosition = 0;
+-            audioPlayer->mPlay.mState = SL_PLAYSTATE_STOPPED;
+-            // stop cancels a pending seek
+-            audioPlayer->mSeek.mPos = SL_TIME_UNKNOWN;
+-            oldFront = audioPlayer->mBufferQueue.mFront;
+-            if (oldFront != audioPlayer->mBufferQueue.mRear) {
+-                assert(0 < audioPlayer->mBufferQueue.mState.count);
+-                track->mReader = oldFront->mBuffer;
+-                track->mAvail = oldFront->mSize;
+-            }
++            IOutputMixExt_StopPlayer(audioPlayer);
+             doBroadcast = SL_BOOLEAN_TRUE;
+             break;
+ 
+@@ -197,6 +207,7 @@ broadcast:
+             playContext = audioPlayer->mPlay.mContext;
+         }
+         if (NULL != playCallback) {
++            vita_mixer_unlock();
+             if (headAtMarker && (audioPlayer->mPlay.mEventFlags & SL_PLAYEVENT_HEADATMARKER)) {
+                 (*playCallback)(&audioPlayer->mPlay.mItf, playContext, SL_PLAYEVENT_HEADATMARKER);
+             }
+@@ -209,6 +220,7 @@ broadcast:
+             if (headAtEnd && (audioPlayer->mPlay.mEventFlags & SL_PLAYEVENT_HEADATEND)) {
+                 (*playCallback)(&audioPlayer->mPlay.mItf, playContext, SL_PLAYEVENT_HEADATEND);
+             }
++            vita_mixer_lock();
+         }
+ 
+     }
+@@ -234,6 +246,7 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+     Summary outputMixSummaries[STEREO_CHANNELS];
+     // This lock should never block, except when the application destroys the output mix object
+     object_lock_exclusive(thisObject);
++    vita_mixer_lock();
+     if (outputMix->mVolume.mMute) {
+         outputMixGains[0] = 0.0f;
+         outputMixGains[1] = 0.0f;
+@@ -290,17 +303,27 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
              summaries[channel] = summarize_gain(gain);
          }
          while (desired > 0) {
@@ -247,7 +336,7 @@ index 7941cdd..cf969e8 100644
                      if (mixBufferHasData) {
                          // apply gain during add
                          if (GAIN_UNITY != summaries[0] || GAIN_UNITY != summaries[1]) {
-@@ -324,15 +334,15 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+@@ -324,15 +347,15 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
                              }
                          // no gain adjustment needed, so do a simple copy
                          } else {
@@ -266,49 +355,79 @@ index 7941cdd..cf969e8 100644
                  if (track->mAvail == 0) {
                      IBufferQueue *bufferQueue = &track->mAudioPlayer->mBufferQueue;
                      interface_lock_exclusive(bufferQueue);
-@@ -364,7 +374,9 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+@@ -364,7 +387,11 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
                      interface_unlock_exclusive(bufferQueue);
                      // The callback function is called on each buffer completion
                      if (NULL != callback) {
 +                        uint64_t callback_start=sceKernelGetProcessTimeWide();
++                        vita_mixer_unlock();
                          (*callback)((SLBufferQueueItf) bufferQueue, context);
++                        vita_mixer_lock();
 +                        if(vita_audio_work)vita_audio_work(1,sceKernelGetProcessTimeWide()-callback_start,0);
                          // Maybe it enqueued another buffer, or maybe it didn't.
                          // We will find out later during the next mixer frame.
                      }
+@@ -387,6 +414,7 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
+             mixBufferHasData = SL_BOOLEAN_TRUE;
+         }
+     }
++    vita_mixer_unlock();
+     object_unlock_exclusive(thisObject);
+     if (mixBufferHasData) {
+         if ((GAIN_MUTE == outputMixSummaries[0]) && (GAIN_MUTE == outputMixSummaries[1])) {
 diff --git a/libopensles/IPlay.c b/libopensles/IPlay.c
-index 62961ae..deb90db 100644
+index 62961ae..de0ca09 100644
 --- a/libopensles/IPlay.c
 +++ b/libopensles/IPlay.c
-@@ -52,6 +52,8 @@ void audioPlayerHandlePositionUpdate(CAudioPlayer *audioPlayer, SLboolean *headA
+@@ -52,6 +52,9 @@ void audioPlayerHandlePositionUpdate(CAudioPlayer *audioPlayer, SLboolean *headA
  #endif
  
  
-+extern int vita_is_mixer_thread(void);
++extern void vita_mixer_lock(void);
++extern void vita_mixer_unlock(void);
 +
  static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
  {
      SL_ENTER_INTERFACE
-@@ -109,6 +111,7 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
-                 break;
- 
-             case (SL_PLAYSTATE_STOPPING << 2) | SL_PLAYSTATE_STOPPED:
-+                if (vita_is_mixer_thread()) break;
-                 // either spurious wakeup, or someone else requested same transition
-                 continue;
- 
-@@ -124,6 +127,10 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+@@ -66,6 +69,9 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+         result = SL_RESULT_SUCCESS;
+         CAudioPlayer *audioPlayer = (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) ?
+             (CAudioPlayer *) this->mThis : NULL;
++#ifdef USE_OUTPUTMIXEXT
++        vita_mixer_lock();
++#endif
+         interface_lock_exclusive(this);
+ #ifdef USE_OUTPUTMIXEXT
+         for (;; interface_cond_wait(this)) {
+@@ -123,8 +129,15 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+                 this->mHeadAtEnd = SL_BOOLEAN_FALSE;
                  this->mHeadStalled = SL_BOOLEAN_FALSE;
                  this->mMarkerReached = SL_BOOLEAN_FALSE;
-                 this->mState = SL_PLAYSTATE_STOPPING;
-+                // HEADATEND callbacks execute on the mixer itself. Leave
-+                // STOPPING queued for its next pass instead of self-waiting.
-+                // GetPlayState already maps STOPPING to STOPPED.
-+                if (vita_is_mixer_thread()) break;
-                 continue;
+-                this->mState = SL_PLAYSTATE_STOPPING;
+-                continue;
++                // Stop under the render lock rather than waiting for the
++                // mixer, which may be blocked on a lock the caller holds.
++                if (NULL != audioPlayer) {
++                    IOutputMixExt_StopPlayer(audioPlayer);
++                    interface_cond_broadcast(this);
++                } else {
++                    this->mState = SL_PLAYSTATE_STOPPED;
++                }
++                break;
  
              default:
-@@ -247,7 +254,10 @@ static SLresult IPlay_GetPosition(SLPlayItf self, SLmillisecond *pMsec)
+                 // unexpected state
+@@ -142,6 +155,9 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
+     attr = ATTR_PLAYSTATE;
+ #endif
+         interface_unlock_exclusive_attributes(this, attr);
++#ifdef USE_OUTPUTMIXEXT
++        vita_mixer_unlock();
++#endif
+         }
+         break;
+     default:
+@@ -247,7 +263,10 @@ static SLresult IPlay_GetPosition(SLPlayItf self, SLmillisecond *pMsec)
          if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
              CAudioPlayer *audioPlayer = (CAudioPlayer *) this->mThis;
              SLmillisecond pos = audioPlayer->mSeek.mPos;
@@ -321,10 +440,10 @@ index 62961ae..deb90db 100644
              }
          }
 diff --git a/libopensles/Vita.c b/libopensles/Vita.c
-index caa1a40..783a753 100644
+index caa1a40..0a40dba 100644
 --- a/libopensles/Vita.c
 +++ b/libopensles/Vita.c
-@@ -33,8 +33,20 @@ static int audio_thread_valid;
+@@ -33,8 +33,24 @@ static int audio_thread_valid;
  static SceUID audio_thread_handle = -1;
  #endif
  
@@ -332,20 +451,24 @@ index caa1a40..783a753 100644
 +extern void vita_audio_timing(unsigned,unsigned,unsigned) __attribute__((weak));
  uint8_t audio_buffers[SndFile_NUMBUFS][SndFile_BUFSIZE];
  
-+// A playback callback runs inside the mixer. It cannot wait for that same
-+// mixer to acknowledge a state transition until the callback has returned.
-+int vita_is_mixer_thread(void) {
-+#ifdef HAVE_PTHREAD
-+	return audio_thread_valid && pthread_equal(pthread_self(), audio_thread_handle);
-+#else
-+	return sceKernelGetThreadId() == audio_thread_handle;
-+#endif
++// Held by the mixer while it reads track buffers, and released around every
++// application callback. Clear and Stop take it to change a track directly
++// rather than waiting for the mixer, which may be blocked in a callback on a
++// lock the caller holds. Order: output mix, then this, then the player.
++static pthread_mutex_t mixer_render_lock = PTHREAD_MUTEX_INITIALIZER;
++
++void vita_mixer_lock(void) {
++	pthread_mutex_lock(&mixer_render_lock);
++}
++
++void vita_mixer_unlock(void) {
++	pthread_mutex_unlock(&mixer_render_lock);
 +}
 +
  static void reset_audio_backend_state(void) {
  	audio_shutdown_requested = 1;
  	audio_thread_running = 0;
-@@ -95,6 +107,18 @@ static int audioThread(unsigned int args, void *arg) {
+@@ -95,6 +111,18 @@ static int audioThread(unsigned int args, void *arg) {
  	audio_thread_running = 1;
  	int res;
  
@@ -364,7 +487,7 @@ index caa1a40..783a753 100644
  	int vol_stereo[] = {32767, 32767};
  	res = sceAudioOutSetVolume(
  			ch,
-@@ -111,8 +135,13 @@ static int audioThread(unsigned int args, void *arg) {
+@@ -111,8 +139,13 @@ static int audioThread(unsigned int args, void *arg) {
  		uint8_t *stream = audio_buffers[buf_idx];
  		buf_idx = (buf_idx + 1) % SndFile_NUMBUFS;
  
@@ -524,7 +647,7 @@ index 0000000..cbb1a09
 +int vita_pcm_render(VitaPcmState *,uint32_t,uint32_t,unsigned,unsigned,
 +    const void *,uint32_t *,int16_t *,uint32_t *);
 diff --git a/libopensles/sles_allinclusive.h b/libopensles/sles_allinclusive.h
-index 851a5ee..c071cb5 100644
+index 851a5ee..ee8f659 100644
 --- a/libopensles/sles_allinclusive.h
 +++ b/libopensles/sles_allinclusive.h
 @@ -24,6 +24,7 @@
@@ -543,15 +666,16 @@ index 851a5ee..c071cb5 100644
  	uint32_t samplerate;
  	int channels;
  	int bps;
-@@ -1351,6 +1353,7 @@ extern void audioPlayerTransportUpdate(CAudioPlayer *audioPlayer);
+@@ -1351,6 +1353,8 @@ extern void audioPlayerTransportUpdate(CAudioPlayer *audioPlayer);
  
  extern SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint32 size);
  extern SLresult IBufferQueue_Clear(SLBufferQueueItf self);
 +extern void IBufferQueue_ClearFromMixer(CAudioPlayer *player);
++extern void IOutputMixExt_StopPlayer(CAudioPlayer *audioPlayer);
  extern SLresult IBufferQueue_RegisterCallback(SLBufferQueueItf self,
      slBufferQueueCallback callback, void *pContext);
  extern void IBufferQueue_Destroy(IBufferQueue *this);
-@@ -1364,4 +1367,4 @@ extern void ReleaseStrongRefAndUnlockExclusive(IObject *object);
+@@ -1364,4 +1368,4 @@ extern void ReleaseStrongRefAndUnlockExclusive(IObject *object);
  
  extern COutputMix *CAudioPlayer_GetOutputMix(CAudioPlayer *audioPlayer);
  
