@@ -13,22 +13,18 @@ struct Face {char name[256];FT_Face face;};
 static struct Face faces[8];
 struct Metrics {uint32_t magic;float ascent,descent,top,bottom,leading;};
 struct Paint {uint32_t magic;FT_Face face;float size;int antialias,bold;struct Metrics metrics;};
-/* Faces stream through the game's file bridge so assets.bin can supply them. */
-static unsigned long font_read(FT_Stream s,unsigned long offset,unsigned char *buf,unsigned long count) {
-    FILE *f=s->descriptor.pointer;
-    if(fseek(f,offset,SEEK_SET))return count?0:1;
-    return count?fread(buf,1,count,f):0;
-}
-static void font_close(FT_Stream s) { fclose(s->descriptor.pointer);free(s); }
+/* Faces are read whole through the game's file bridge so assets.bin can
+ * supply them; glyph loads then never wait on the memory card. Faces stay
+ * cached for the process lifetime, so the buffer is never freed. */
 static int open_font(const char *name,FT_Face *face) {
     char path[1024];snprintf(path,sizeof(path),"%s%s",INSTALL_PATH,name);
     FILE *f=fopen_soloader(path,"rb");if(!f)return -1;
-    FT_Stream s=calloc(1,sizeof(*s));
-    if(!s || fseek(f,0,SEEK_END)){free(s);fclose(f);return -1;}
-    s->size=ftell(f);s->descriptor.pointer=f;s->read=font_read;s->close=font_close;
-    FT_Open_Args args={.flags=FT_OPEN_STREAM,.stream=s};
-    /* FreeType closes the stream itself when opening fails. */
-    return FT_Open_Face(ft,&args,0,face)?-1:0;
+    long size=fseek(f,0,SEEK_END)?-1:ftell(f);
+    unsigned char *data=size>0?malloc(size):NULL;
+    int ok=data && !fseek(f,0,SEEK_SET) && fread(data,1,size,f)==(size_t)size;
+    fclose(f);
+    if(!ok || FT_New_Memory_Face(ft,data,size,0,face)){free(data);return -1;}
+    return 0;
 }
 #define PAINT_MAGIC 0x5041494e
 #define METRICS_MAGIC 0x464d4554
