@@ -22,6 +22,27 @@ static volatile unsigned shadow_capacity,shadow_count;
 static SceKernelLwMutexWork shadow_lock;
 static SceUID shadow_log=-1;
 
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+#include <psp2/kernel/processmgr.h>
+static unsigned diag_reads,diag_hits,diag_misses;static uint64_t diag_bytes,diag_us,diag_max,diag_requested;
+static int pack_pread(void *buf,SceSize n,SceOff at) {
+    uint64_t t=sceKernelGetProcessTimeWide();int r=sceIoPread(pack,buf,n,at);t=sceKernelGetProcessTimeWide()-t;
+    __atomic_add_fetch(&diag_reads,1,__ATOMIC_RELAXED);if(r>0)__atomic_add_fetch(&diag_bytes,r,__ATOMIC_RELAXED);
+    __atomic_add_fetch(&diag_us,t,__ATOMIC_RELAXED);if(t>diag_max)diag_max=t;
+    return r;
+}
+void sif_pack_diag_log(void) {
+    unsigned n=__atomic_exchange_n(&diag_reads,0,__ATOMIC_RELAXED);
+    uint64_t b=__atomic_exchange_n(&diag_bytes,0,__ATOMIC_RELAXED),us=__atomic_exchange_n(&diag_us,0,__ATOMIC_RELAXED),m=diag_max;diag_max=0;
+    unsigned hits=__atomic_exchange_n(&diag_hits,0,__ATOMIC_RELAXED),misses=__atomic_exchange_n(&diag_misses,0,__ATOMIC_RELAXED);
+    uint64_t req=__atomic_exchange_n(&diag_requested,0,__ATOMIC_RELAXED);
+    if(n || hits)sif_log("PACK IO reads=%u kb=%llu wait-ms=%llu max-ms=%llu requested-kb=%llu hits=%u misses=%u",n,(unsigned long long)(b/1024),
+        (unsigned long long)(us/1000),(unsigned long long)(m/1000),(unsigned long long)(req/1024),hits,misses);
+}
+#else
+#define pack_pread(buf,n,at) sceIoPread(pack,buf,n,at)
+#endif
+
 #define FNV_OFFSET 0xcbf29ce484222325ULL
 #define FNV_PRIME 0x100000001b3ULL
 static uint64_t fnv(uint64_t h,const char *s,size_t n) {
@@ -120,6 +141,7 @@ static void add_shadow(const struct sif_asset_ref *ref,uint64_t hash) {
     }
     sceKernelUnlockLwMutex(&shadow_lock,1);
 }
+static void cache_init(void);
 void sif_pack_init(void) {
     sceKernelCreateLwMutex(&shadow_lock,"sif_pack_shadow",0,0,NULL);
     pack=sceIoOpen(SIF_PACK_PATH,SCE_O_RDONLY,0);
@@ -137,6 +159,7 @@ void sif_pack_init(void) {
         sif_stop("Pack index read failed");
     if(crc32(0,(const Bytef*)entries,bytes)!=header.index_crc)sif_stop("assets.bin index is corrupt");
     load_shadow();
+    cache_init();
     sif_log("Pack: %u entries, %llu bytes, install=%d external=%d",header.entry_count,
         (unsigned long long)header.file_size,sif_pack_has_root(SIF_ASSET_INSTALL),sif_pack_has_root(SIF_ASSET_EXTERNAL));
 }
@@ -174,12 +197,92 @@ static int open_vfd(const struct sif_pack_entry *e) {
     return fd;
 }
 int sif_pack_is_fd(int fd) { return fd>=0 && fd<MAX_FDS && __atomic_load_n(&fds[fd].active,__ATOMIC_ACQUIRE); }
+
+/* All pack streams share one cache of BLOCK-aligned pack blocks. The game
+ * reopens and rereads the same assets constantly, and every memory card
+ * request is expensive no matter how small; aligned blocks also keep each
+ * miss on the driver's direct-transfer path. The lock covers lookups and
+ * copies only, never the card read itself. */
+#define BLOCK 131072
+#define CACHE_BLOCKS 192
+struct slot { uint64_t key; uint32_t len,used; int loading; };
+static struct slot slots[CACHE_BLOCKS];
+static unsigned char *arena;
+static unsigned slot_count,tick;
+static SceKernelLwMutexWork cache_lock;
+static void cache_init(void) {
+    sceKernelCreateLwMutex(&cache_lock,"sif_pack_cache",0,0,NULL);
+    for(slot_count=CACHE_BLOCKS;slot_count && !(arena=malloc((size_t)slot_count*BLOCK));slot_count/=2);
+    sif_log("Pack cache: %u KB",slot_count*(BLOCK/1024));
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+    extern void sif_diag_heap(const char*);sif_diag_heap("after pack cache");
+#endif
+}
+/* Copies from block `key` if cached; returns bytes copied or -1 on a miss. */
+static long cache_copy_locked(uint64_t key,uint32_t off,unsigned char *out,size_t want) {
+    for(unsigned i=0;i<slot_count;i++) {
+        struct slot *s=&slots[i];
+        if(s->key!=key+1 || s->loading)continue;
+        if(off>=s->len)return 0;
+        size_t k=s->len-off<want?s->len-off:want;
+        memcpy(out,arena+(size_t)i*BLOCK+off,k);s->used=++tick;
+        return k;
+    }
+    return -1;
+}
 static ssize_t read_at(uint64_t base,uint32_t size,uint32_t pos,void *buf,size_t n) {
     if(pos>=size)return 0;
     if(n>size-pos)n=size-pos;
-    int r=sceIoPread(pack,buf,n,base+pos);
-    if(r<0){errno=EIO;return -1;}
-    return r;
+    unsigned char *out=buf;size_t done=0;
+    while(done<n) {
+        uint64_t at=base+pos+done,key=at&~(uint64_t)(BLOCK-1);uint32_t off=at-key;size_t want=n-done;
+        /* Bulk aligned reads bypass the cache instead of flushing it. */
+        if(!off && want>=2*BLOCK) {
+            int r=pack_pread(out+done,want&~(size_t)(BLOCK-1),at);
+            if(r<=0){if(r<0 && !done){errno=EIO;return -1;}break;}
+            done+=r;continue;
+        }
+        sceKernelLockLwMutex(&cache_lock,1,NULL);
+        long k=cache_copy_locked(key,off,out+done,want);
+        if(k>=0) {
+            sceKernelUnlockLwMutex(&cache_lock,1);
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+            __atomic_add_fetch(&diag_hits,1,__ATOMIC_RELAXED);
+#endif
+            if(!k)break;
+            done+=k;continue;
+        }
+        struct slot *victim=NULL;
+        for(unsigned i=0;i<slot_count;i++)
+            if(!slots[i].loading && (!victim || slots[i].used<victim->used))victim=&slots[i];
+        uint64_t left=header.file_size-key;uint32_t len=left<BLOCK?left:BLOCK;
+        if(!victim) {
+            /* No cache, or every block is mid-load: read just this span. */
+            sceKernelUnlockLwMutex(&cache_lock,1);
+            size_t k2=BLOCK-off<want?BLOCK-off:want;
+            int r=pack_pread(out+done,k2,at);
+            if(r<=0){if(r<0 && !done){errno=EIO;return -1;}break;}
+            done+=r;continue;
+        }
+        victim->key=key+1;victim->loading=1;
+        sceKernelUnlockLwMutex(&cache_lock,1);
+        unsigned char *data=arena+(size_t)(victim-slots)*BLOCK;
+        int r=pack_pread(data,len,key);
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+        __atomic_add_fetch(&diag_misses,1,__ATOMIC_RELAXED);
+#endif
+        sceKernelLockLwMutex(&cache_lock,1,NULL);
+        victim->loading=0;victim->len=r>0?r:0;victim->used=++tick;
+        if(r<=0)victim->key=0;
+        k=r>(int)off?cache_copy_locked(key,off,out+done,want):0;
+        sceKernelUnlockLwMutex(&cache_lock,1);
+        if(k<=0){if(r<0 && !done){errno=EIO;return -1;}break;}
+        done+=k;
+    }
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+    __atomic_add_fetch(&diag_requested,done,__ATOMIC_RELAXED);
+#endif
+    return done;
 }
 ssize_t sif_pack_read(int fd,void *buf,size_t n) {
     struct vfd *v=&fds[fd];ssize_t r=read_at(v->base,v->size,v->pos,buf,n);
@@ -198,7 +301,9 @@ off_t sif_pack_lseek(int fd,off_t offset,int whence) {
     return r;
 }
 int sif_pack_fstat(int fd,uint32_t *size,uint32_t *mtime) { *size=fds[fd].size;*mtime=header.mtime;return 0; }
-void sif_pack_close(int fd) { __atomic_store_n(&fds[fd].active,0,__ATOMIC_RELEASE);close(fd); }
+void sif_pack_close(int fd) {
+    __atomic_store_n(&fds[fd].active,0,__ATOMIC_RELEASE);close(fd);
+}
 
 struct cookie { uint64_t base; uint32_t size,pos; int fd; };
 static int cookie_read(void *c,char *buf,int n) {
