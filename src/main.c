@@ -64,6 +64,10 @@ void sif_log(const char *fmt,...) {
     int n=vsnprintf(b,sizeof(b)-2,fmt,a); va_end(a);
     if(n<0)return; if(n>(int)sizeof(b)-3)n=sizeof(b)-3;
     b[n++]='\n'; b[n]=0; sceClibPrintf("[SIF] %s",b);
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+    char t[24];int tn=snprintf(t,sizeof(t),"%llu ",(unsigned long long)(sceKernelGetProcessTimeWide()/1000));
+    if(log_fd>=0) sceIoWrite(log_fd,t,tn);
+#endif
     if(log_fd>=0) sceIoWrite(log_fd,b,n);
 }
 void sif_stop(const char *reason) {
@@ -73,7 +77,21 @@ void sif_stop(const char *reason) {
 #endif
     for(;;)sceKernelDelayThread(1000000);
 }
+#define GAME_SHA256 "8f6df2ab79bbf1065fd26cd2e6fd4172c26f1763460ce4ddef9814412e4460ae"
+#define GAME_STAMP DATA_PATH "libGame.verified"
+/* Hashing the 5 MB library costs seconds on the memory card, so a verified
+ * copy is remembered by size and modification time. */
+static int game_stamp(char *out,size_t n) {
+    SceIoStat st; if(sceIoGetstat(SO_PATH,&st)<0)return -1;
+    SceDateTime *m=&st.st_mtime;
+    return snprintf(out,n,"%s %lld %u-%u-%u %u:%u:%u.%u\n",GAME_SHA256,(long long)st.st_size,
+        m->year,m->month,m->day,m->hour,m->minute,m->second,(unsigned)m->microsecond);
+}
 static void verify_game(void) {
+    char stamp[160],saved[160]={0};int len=game_stamp(stamp,sizeof(stamp));
+    SceUID s=sceIoOpen(GAME_STAMP,SCE_O_RDONLY,0);
+    if(s>=0){sceIoRead(s,saved,sizeof(saved)-1);sceIoClose(s);}
+    if(len>0 && !strcmp(stamp,saved)){sif_log("libGame.so verified earlier");return;}
     unsigned char h[32]; char hex[65]; unsigned char buf[32768];
     SHA256_CTX ctx; SHA256_Init(&ctx);
     FILE *f=fopen(SO_PATH,"rb"); if(!f)sif_stop("libGame.so missing");
@@ -81,8 +99,9 @@ static void verify_game(void) {
     if(ferror(f))sif_stop("libGame.so read failed"); fclose(f);
     SHA256_Final(h,&ctx); for(int i=0;i<32;i++)sprintf(hex+2*i,"%02x",h[i]);
     sif_log("libGame.so SHA256 %s",hex);
-    if(strcmp(hex,"8f6df2ab79bbf1065fd26cd2e6fd4172c26f1763460ce4ddef9814412e4460ae"))
+    if(strcmp(hex,GAME_SHA256))
         sif_stop("Unsupported game binary");
+    if(len>0 && (s=sceIoOpen(GAME_STAMP,SCE_O_WRONLY|SCE_O_CREAT|SCE_O_TRUNC,0666))>=0){sceIoWrite(s,stamp,len);sceIoClose(s);}
 }
 static uintptr_t entry(const char *name) {
     char b[160]; snprintf(b,sizeof(b),"app_klb_android_GameEngine_PFInterface_%s",name);
@@ -156,5 +175,8 @@ int main(void) {
         __atomic_add_fetch(&completed_frames,1,__ATOMIC_RELAXED);
 #endif
         if(++frames%300==0)sif_log("frames=%u delta=%u",frames,delta);
+#ifdef SIF_PRIVATE_DIAGNOSTICS
+        if(frames%60==0){extern void sif_pack_diag_log(void);sif_pack_diag_log();}
+#endif
     }
 }
