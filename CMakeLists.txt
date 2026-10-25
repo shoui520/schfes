@@ -45,12 +45,18 @@ target_link_libraries(sif_vita -Wl,--wrap=sceKernelCreateThread npps
  SceIme_stub SceSysmodule_stub SceAppMgr_stub SceAppUtil_stub SceAudio_stub SceAudioIn_stub SceCommonDialog_stub SceDisplay_stub
  SceKernelDmacMgr_stub SceCtrl_stub SceGxm_stub ScePower_stub SceVshBridge_stub SceNet_stub SceNetCtl_stub)
 vita_create_self(eboot.bin sif_vita UNSAFE NOASLR)
-set(SIF_PACKAGE_ASSETS "" CACHE PATH "Directory containing locally supplied LiveArea artwork")
+set(SIF_PACKAGE_ASSETS "${CMAKE_SOURCE_DIR}/assets" CACHE PATH "Directory containing LiveArea artwork")
 if(NOT EXISTS "${SIF_PACKAGE_ASSETS}/livearea/template.xml")
- message(FATAL_ERROR "Set SIF_PACKAGE_ASSETS to the local artwork directory containing livearea/template.xml")
+ message(FATAL_ERROR "SIF_PACKAGE_ASSETS must contain livearea/template.xml")
+endif()
+# pic0.png (960x544, indexed) is optional artwork.
+set(SIF_PIC0)
+if(EXISTS "${SIF_PACKAGE_ASSETS}/livearea/pic0.png")
+ set(SIF_PIC0 ${SIF_PACKAGE_ASSETS}/livearea/pic0.png sce_sys/pic0.png)
 endif()
 vita_create_vpk(sif_vita.vpk SIFV00001 eboot.bin VERSION 00.01 NAME "スクフェス"
  FILE ${SIF_PACKAGE_ASSETS}/livearea/icon0.png sce_sys/icon0.png
+ ${SIF_PIC0}
  ${SIF_PACKAGE_ASSETS}/livearea/startup.png sce_sys/livearea/contents/startup.png
  ${SIF_PACKAGE_ASSETS}/livearea/bg0.png sce_sys/livearea/contents/bg0.png
  ${SIF_PACKAGE_ASSETS}/livearea/template.xml sce_sys/livearea/contents/template.xml
