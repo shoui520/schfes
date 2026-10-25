@@ -15,7 +15,7 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-warn-mismatch")
 include(third_party/Dependencies.cmake)
 add_subdirectory(src/server)
 add_executable(sif_vita
- src/preferences.c src/server_info.c src/thread_affinity.c src/poll_bridge.c src/net_bridge.c src/crypto.c src/stdio_bridge.c src/input.c src/fonts.c src/assets.c src/asset_paths.c src/asset_pack.c src/compat.c src/main.c src/dynlib.c src/java.c src/java_platform.c src/java_overlay.c src/gl_bridge.c src/math_bridge.c
+ src/preferences.c src/server_info.c src/thread_affinity.c src/poll_bridge.c src/net_bridge.c src/crypto.c src/stdio_bridge.c src/input.c src/fonts.c src/game_fixes.c src/assets.c src/asset_paths.c src/asset_pack.c src/compat.c src/main.c src/dynlib.c src/java.c src/java_platform.c src/java_overlay.c src/gl_bridge.c src/math_bridge.c
  src/utils/logger.c src/utils/utils.c
  src/reimpl/bits/_ctype.c src/reimpl/errno.c src/reimpl/io.c
  src/reimpl/log.c src/reimpl/mem.c src/reimpl/pthr.c src/reimpl/sys.c src/reimpl/time64.c

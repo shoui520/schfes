@@ -25,6 +25,8 @@ void sif_log(const char *fmt,...) __attribute__((format(printf,1,2)));
 void sif_stop(const char *reason) __attribute__((noreturn));
 void sif_write_server_info(void);
 int resolve_imports(so_module *mod);
+// Hooks into libGame.so; install after relocation, before flushing caches.
+void sif_install_game_fixes(void);
 void sif_java_init(void);
 void sif_java_check_method(const char *name,const char *signature);
 void sif_java_check_field(const char *name,const char *signature);

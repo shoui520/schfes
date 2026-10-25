@@ -127,6 +127,7 @@ int main(void) {
     if(r<0)sif_stop("so load failed");
     so_relocate(&so_mod);
     if(resolve_imports(&so_mod)<0)sif_stop("Import audit failed");
+    sif_install_game_fixes();
     so_flush_caches(&so_mod);
     sif_java_init();
 #ifdef SIF_PRIVATE_DIAGNOSTICS
